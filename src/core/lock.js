@@ -21,6 +21,20 @@ const DEFAULT_TIMING = {
 };
 const THROTTLE_FALLBACK_MS = 3000;
 
+// Resolves early when signal aborts.
+function abortableSleep(ms, signal) {
+  return new Promise((resolve) => {
+    if (signal && signal.aborted) return resolve();
+    const done = () => {
+      clearTimeout(timer);
+      if (signal) signal.removeEventListener('abort', done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    if (signal) signal.addEventListener('abort', done, { once: true });
+  });
+}
+
 function versionFor(key) {
   return crypto.createHash('sha256').update(`${ENVELOPE}:${key}`).digest('hex');
 }
@@ -29,7 +43,7 @@ function createLock({
   twirp, rest, repository, ref, slug, identity,
   blobs = http.blobs,
   now = Date.now,
-  sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
+  sleep = abortableSleep,
   random = Math.random,
   timing = {},
   log = () => {},
@@ -176,7 +190,7 @@ function createLock({
       // After a 429, spread waiters across the next window.
       await sleep(throttled
         ? http.retryAfterMs(res.headers, THROTTLE_FALLBACK_MS) + random() * delay
-        : delay + random() * t.pollJitterMs);
+        : delay + random() * t.pollJitterMs, signal);
     }
   }
 
@@ -208,7 +222,7 @@ function createLock({
       if (now() - start >= waitMs) return false;
       await sleep(http.isThrottled(res)
         ? http.retryAfterMs(res.headers, THROTTLE_FALLBACK_MS)
-        : t.pollDelayMs + random() * t.pollJitterMs);
+        : t.pollDelayMs + random() * t.pollJitterMs, signal);
     }
   }
 

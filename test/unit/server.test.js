@@ -326,14 +326,15 @@ test('a malformed request target is a 400, not a crash', async () => {
 });
 
 test('a LOCK pending at shutdown is not granted', async () => {
-  let finish;
   const lock = fakeLock();
-  lock.acquire = () => new Promise((resolve) => { finish = () => resolve({ ok: true, entryId: 'late', holderId: 'h' }); });
+  lock.acquire = ({ signal }) => new Promise((resolve) => {
+    signal.addEventListener('abort', () => setTimeout(() => resolve({ ok: true, entryId: 'late', holderId: 'h' }), 10));
+  });
   const s = await setup({ lock });
   const first = s.call('LOCK', '/lock', s.lockBody('a'));
   await new Promise((r) => setTimeout(r, 20));
   assert.equal((await s.call('POST', '/shutdown')).status, 200);
-  finish();
+  assert.deepEqual(lock.state.released, ['late']);
   assert.equal((await first).status, 423);
   assert.deepEqual(lock.state.released, ['late']);
   assert.equal(s.app.held, null);
@@ -366,5 +367,39 @@ test('a version without a name annotation is accepted', async () => {
   await store.push({ bytes: Buffer.from(stateJson(1)), mediaType: 'x', annotations: { [`${PREFIX}.serial`]: '1' }, tags: ['root'] });
   const s = await setup({ store });
   assert.equal((await s.app.loadLatest()).toString(), stateJson(1));
+  await s.close();
+});
+
+function slowStore(delayMs) {
+  const store = fakeStore();
+  const push = store.push.bind(store);
+  store.push = async (v) => { await new Promise((r) => setTimeout(r, delayMs)); return push(v); };
+  return store;
+}
+
+test('shutdown waits for a save in flight before releasing and answering', async () => {
+  const s = await setup({ store: slowStore(150) });
+  await s.call('LOCK', '/lock', s.lockBody('a'));
+  await s.call('GET', '/state');
+  const save = s.call('POST', '/state?ID=a', stateJson(1));
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal((await s.call('POST', '/shutdown')).status, 200);
+  assert.equal(s.store.versions.length, 1);
+  assert.deepEqual(s.lock.state.released, ['e1']);
+  assert.equal(s.events.shutdown, 1);
+  assert.equal((await save).status, 200);
+  await s.close();
+});
+
+test('shutdown stops waiting for handlers after the drain cap', async () => {
+  const s = await setup({ store: slowStore(400), shutdownDrainMs: 50 });
+  await s.call('LOCK', '/lock', s.lockBody('a'));
+  await s.call('GET', '/state');
+  const save = s.call('POST', '/state?ID=a', stateJson(1));
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal((await s.call('POST', '/shutdown')).status, 200);
+  assert.equal(s.store.versions.length, 0);
+  assert.equal(s.events.shutdown, 1);
+  await save;
   await s.close();
 });

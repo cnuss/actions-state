@@ -191,3 +191,25 @@ test('lock-timeout 0 still reclaims a lock whose holder job has completed', asyn
   assert.equal(got.ok, true);
   assert.equal((await makeLock(fake, c, 8).readCurrent()).holder.lockInfo.ID, 'b');
 });
+
+test('aborting during a long real sleep wakes acquire and waitUntilFree at once', async () => {
+  const fake = createFakeCache();
+  const timing = { pollDelayMs: 5000, pollJitterMs: 0 };
+  await makeLock(fake, clock(), 1).acquire({ info: { ID: 'a' }, waitMs: 0 });
+  const real = createLock({
+    twirp: fake.twirp, rest: fake.rest, blobs: fake.blobs,
+    repository: 'o/r', ref: 'refs/heads/main', slug: 'root', identity: identity(2), random: () => 0, timing,
+  });
+
+  const abort = new AbortController();
+  setTimeout(() => abort.abort(), 50);
+  let started = Date.now();
+  assert.deepEqual(await real.acquire({ info: { ID: 'b' }, waitMs: 60_000, signal: abort.signal }), { ok: false, aborted: true });
+  assert.ok(Date.now() - started < 1000, `acquire took ${Date.now() - started} ms`);
+
+  const abort2 = new AbortController();
+  setTimeout(() => abort2.abort(), 50);
+  started = Date.now();
+  assert.equal(await real.waitUntilFree({ waitMs: 60_000, signal: abort2.signal }), false);
+  assert.ok(Date.now() - started < 1000, `waitUntilFree took ${Date.now() - started} ms`);
+});

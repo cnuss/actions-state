@@ -11,6 +11,8 @@ const { annotationsFor, serialOf, PREFIX } = require('./core/store');
 
 // One try plus three retries.
 const PUSH_ATTEMPTS = 4;
+// How long /shutdown waits for requests still being handled.
+const SHUTDOWN_DRAIN_MS = 10_000;
 
 function readBody(req) {
   return new Promise((resolve, reject) => {
@@ -28,6 +30,7 @@ function createApp({
   sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
   onHeldChange = () => {},
   onShutdown = () => {},
+  shutdownDrainMs = SHUTDOWN_DRAIN_MS,
 }) {
   const writable = isDefaultRef || allowAnyRef;
   let held = null;     // { id, info, virtual, entryId, holderId }
@@ -36,6 +39,7 @@ function createApp({
   let cache = null;    // { digest, serial, bytes } with bytes decrypted
   let pendingAbort = null; // AbortController of the LOCK still waiting
   let closed = false;      // set by /shutdown; no lock is granted after it
+  const inflight = new Map(); // req -> promise of its handler
 
   function authorized(req) {
     const header = req.headers.authorization || '';
@@ -219,7 +223,24 @@ function createApp({
     return send(res, status, text);
   }
 
+  // Every handler but the caller's own, capped at shutdownDrainMs.
+  async function drain(except) {
+    const pending = [...inflight].filter(([r]) => r !== except).map(([, p]) => p);
+    if (!pending.length) return;
+    let timer;
+    const cap = new Promise((r) => { timer = setTimeout(() => r(true), shutdownDrainMs); });
+    const capped = await Promise.race([Promise.allSettled(pending).then(() => false), cap]);
+    clearTimeout(timer);
+    if (capped) log(`shutting down with requests still in flight after ${shutdownDrainMs / 1000}s`);
+  }
+
   async function handle(req, res) {
+    const work = dispatch(req, res);
+    inflight.set(req, work);
+    try { return await work; } finally { inflight.delete(req); }
+  }
+
+  async function dispatch(req, res) {
     let route = req.method;
     try {
       let url;
@@ -237,6 +258,7 @@ function createApp({
         case 'POST /shutdown':
           closed = true;
           if (pendingAbort) pendingAbort.abort();
+          await drain(req);
           await releaseHeld();
           send(res, 200, 'bye');
           return onShutdown();

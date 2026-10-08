@@ -16,6 +16,8 @@ const { repoInfo, packageVisibility, findSelfJob } = require('./src/core/github'
 const { getAdapter } = require('./src/adapters');
 
 const START_TIMEOUT_MS = 10_000;
+// Longer than the server's 10 s wait for requests still in flight.
+const SHUTDOWN_TIMEOUT_MS = 30_000;
 
 function log(msg) { process.stdout.write(`${msg}\n`); }
 
@@ -167,7 +169,7 @@ async function post() {
   let stopped = false;
   if (run.port && password) {
     try {
-      stopped = (await request('POST', `http://127.0.0.1:${run.port}/shutdown`, basicAuth(password), null, { timeoutMs: 15_000 })).status === 200;
+      stopped = (await request('POST', `http://127.0.0.1:${run.port}/shutdown`, basicAuth(password), null, { timeoutMs: SHUTDOWN_TIMEOUT_MS })).status === 200;
     } catch { /* server already gone */ }
   }
   if (!stopped) {
