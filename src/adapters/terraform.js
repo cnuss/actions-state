@@ -144,6 +144,9 @@ function unwire(dir) {
 
 function stateMeta(bytes) {
   const doc = JSON.parse(bytes.toString('utf8'));
+  if (doc === null || typeof doc !== 'object' || Array.isArray(doc) || !Number.isInteger(doc.version)) {
+    throw new Error('not a state file: expected an object with an integer "version"');
+  }
   return {
     serial: Number.isInteger(doc.serial) ? doc.serial : 0,
     lineage: typeof doc.lineage === 'string' ? doc.lineage : '',

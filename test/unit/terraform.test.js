@@ -99,3 +99,9 @@ test('stateMeta defaults missing fields', () => {
 test('stateMeta throws on non-JSON', () => {
   assert.throws(() => tf.stateMeta(Buffer.from('not json')));
 });
+
+test('stateMeta throws on JSON that is not a state object', () => {
+  for (const body of ['{}', '[]', '123', '"x"', 'true', 'null', '{"version":"4"}']) {
+    assert.throws(() => tf.stateMeta(Buffer.from(body)), /not a state file/, body);
+  }
+});
