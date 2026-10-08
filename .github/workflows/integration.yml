@@ -1,0 +1,341 @@
+name: Integration
+
+# End-to-end runs against GHCR and the Actions cache. Every state name is unique
+# to the run and the cleanup job deletes the run's package versions. Jobs set
+# allow-apply-from-any-ref so they also run on pull requests; the refs job
+# checks the default without it.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  packages: write
+  contents: read
+
+env:
+  TERRAFORM_VERSION: 1.16.5
+  TOFU_VERSION: 1.13.1
+  PREFIX: it-${{ github.run_id }}-${{ github.run_attempt }}
+  # Test-only value: these states hold nothing but terraform_data.
+  PASSPHRASE: integration-test-passphrase
+  FIXTURE: test/fixtures/data
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  lifecycle:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        tool: [terraform, tofu]
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - run: test/scripts/install-tool.sh ${{ matrix.tool }}
+      - uses: ./
+        with:
+          working-directory: ${{ env.FIXTURE }}
+          name: ${{ env.PREFIX }}-lifecycle-${{ matrix.tool }}
+          passphrase: ${{ env.PASSPHRASE }}
+          allow-apply-from-any-ref: true
+      - name: First apply creates state
+        working-directory: ${{ env.FIXTURE }}
+        run: |
+          ${{ matrix.tool }} init -input=false
+          ${{ matrix.tool }} apply -auto-approve -input=false -var value=one
+      - run: node test/scripts/inspect.js "$PREFIX-lifecycle-${{ matrix.tool }}" --expect-encrypted --min-serial 1
+
+  lifecycle-reload:
+    needs: lifecycle
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        tool: [terraform, tofu]
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - run: test/scripts/install-tool.sh ${{ matrix.tool }}
+      - uses: ./
+        with:
+          working-directory: ${{ env.FIXTURE }}
+          name: ${{ env.PREFIX }}-lifecycle-${{ matrix.tool }}
+          passphrase: ${{ env.PASSPHRASE }}
+          allow-apply-from-any-ref: true
+      - name: A new job sees the saved state, then changes it
+        working-directory: ${{ env.FIXTURE }}
+        run: |
+          ${{ matrix.tool }} init -input=false
+          ${{ matrix.tool }} plan -detailed-exitcode -input=false -var value=one
+          ${{ matrix.tool }} apply -auto-approve -input=false -var value=two
+      - run: node test/scripts/inspect.js "$PREFIX-lifecycle-${{ matrix.tool }}" --expect-encrypted --min-serial 2
+
+  wrong-passphrase:
+    needs: lifecycle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - id: wrong
+        continue-on-error: true
+        uses: ./
+        with:
+          working-directory: ${{ env.FIXTURE }}
+          name: ${{ env.PREFIX }}-lifecycle-terraform
+          passphrase: not-the-passphrase
+          allow-apply-from-any-ref: true
+      - name: The action must fail before Terraform runs
+        if: steps.wrong.outcome != 'failure'
+        run: |
+          echo "::error::a wrong passphrase was accepted"
+          exit 1
+
+  public-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - id: guard
+        continue-on-error: true
+        uses: ./
+        with:
+          working-directory: ${{ env.FIXTURE }}
+          name: ${{ env.PREFIX }}-guard
+          allow-apply-from-any-ref: true
+      - name: A public repo without a passphrase must be refused
+        if: steps.guard.outcome != 'failure'
+        run: |
+          echo "::error::state would have been stored unencrypted in a public package"
+          exit 1
+
+  backend-conflict:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - run: test/scripts/install-tool.sh terraform
+      - id: refused
+        continue-on-error: true
+        uses: ./
+        with:
+          working-directory: test/fixtures/s3-backend
+          name: ${{ env.PREFIX }}-conflict-refused
+          passphrase: ${{ env.PASSPHRASE }}
+          allow-apply-from-any-ref: true
+      - name: A declared backend must be refused by default
+        if: steps.refused.outcome != 'failure'
+        run: |
+          echo "::error::the s3 backend was silently replaced"
+          exit 1
+      - uses: ./
+        with:
+          working-directory: test/fixtures/s3-backend
+          name: ${{ env.PREFIX }}-conflict-replaced
+          passphrase: ${{ env.PASSPHRASE }}
+          allow-apply-from-any-ref: true
+          replace-backend: true
+      - name: replace-backend overrides it without touching AWS
+        working-directory: test/fixtures/s3-backend
+        run: |
+          terraform init -input=false
+          terraform apply -auto-approve -input=false
+
+  contention-seed:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - run: test/scripts/install-tool.sh terraform
+      - uses: ./
+        with:
+          working-directory: ${{ env.FIXTURE }}
+          name: ${{ env.PREFIX }}-contention
+          passphrase: ${{ env.PASSPHRASE }}
+          allow-apply-from-any-ref: true
+      - working-directory: ${{ env.FIXTURE }}
+        run: |
+          terraform init -input=false
+          terraform apply -auto-approve -input=false -var value=seed
+
+  contention:
+    needs: contention-seed
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        n: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - run: test/scripts/install-tool.sh terraform
+      - uses: ./
+        with:
+          working-directory: ${{ env.FIXTURE }}
+          name: ${{ env.PREFIX }}-contention
+          passphrase: ${{ env.PASSPHRASE }}
+          allow-apply-from-any-ref: true
+      - name: Concurrent applies take turns
+        working-directory: ${{ env.FIXTURE }}
+        run: |
+          terraform init -input=false
+          terraform apply -auto-approve -input=false -var value=n${{ matrix.n }} -var sleep=10
+
+  contention-verify:
+    needs: contention
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - run: node test/scripts/inspect.js "$PREFIX-contention" --expect-encrypted --min-serial 4
+
+  fail-fast-holder:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - run: test/scripts/install-tool.sh terraform
+      - uses: ./
+        with:
+          working-directory: ${{ env.FIXTURE }}
+          name: ${{ env.PREFIX }}-failfast
+          passphrase: ${{ env.PASSPHRASE }}
+          allow-apply-from-any-ref: true
+      - name: Create state, then hold the lock for two minutes
+        working-directory: ${{ env.FIXTURE }}
+        run: |
+          terraform init -input=false
+          terraform apply -auto-approve -input=false -var value=a
+          terraform apply -auto-approve -input=false -var value=b -var sleep=120
+
+  fail-fast:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - run: test/scripts/install-tool.sh terraform
+      - name: Wait for the holder's first version, then for it to take the lock
+        run: |
+          node test/scripts/inspect.js "$PREFIX-failfast" --wait 600
+          sleep 30
+      - uses: ./
+        with:
+          working-directory: ${{ env.FIXTURE }}
+          name: ${{ env.PREFIX }}-failfast
+          passphrase: ${{ env.PASSPHRASE }}
+          allow-apply-from-any-ref: true
+          lock-timeout: 0
+      - id: apply
+        continue-on-error: true
+        working-directory: ${{ env.FIXTURE }}
+        run: |
+          terraform init -input=false
+          terraform apply -auto-approve -input=false -var value=c 2>&1 | tee "$RUNNER_TEMP/apply.log"
+          exit "${PIPESTATUS[0]}"
+      - name: The second apply fails at once with the holder's lock info
+        run: |
+          [ "${{ steps.apply.outcome }}" = failure ]
+          grep -q 'Lock Info' "$RUNNER_TEMP/apply.log"
+
+  crash-holder:
+    runs-on: ubuntu-latest
+    # Killing the runner fails this job on purpose; the waiter is the test.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - run: test/scripts/install-tool.sh terraform
+      - uses: ./
+        with:
+          working-directory: ${{ env.FIXTURE }}
+          name: ${{ env.PREFIX }}-crash
+          passphrase: ${{ env.PASSPHRASE }}
+          allow-apply-from-any-ref: true
+      - name: Create state, take the lock, then kill the runner
+        working-directory: ${{ env.FIXTURE }}
+        run: |
+          terraform init -input=false
+          terraform apply -auto-approve -input=false -var value=a
+          terraform apply -auto-approve -input=false -var value=b -var sleep=600 &
+          sleep 30
+          sudo pkill -9 -f Runner.Worker
+
+  crash-waiter:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - run: test/scripts/install-tool.sh terraform
+      - name: Wait for the holder's first version, then for it to take the lock
+        run: |
+          node test/scripts/inspect.js "$PREFIX-crash" --wait 600
+          sleep 30
+      - uses: ./
+        with:
+          working-directory: ${{ env.FIXTURE }}
+          name: ${{ env.PREFIX }}-crash
+          passphrase: ${{ env.PASSPHRASE }}
+          allow-apply-from-any-ref: true
+          lock-timeout: 900
+      - name: The abandoned lock is reclaimed and the apply goes through
+        working-directory: ${{ env.FIXTURE }}
+        run: |
+          terraform init -input=false
+          start=$(date +%s)
+          terraform apply -auto-approve -input=false -var value=c
+          echo "waited and applied in $(( $(date +%s) - start ))s" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  stale-save:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - run: test/scripts/install-tool.sh terraform
+      - id: state
+        uses: ./
+        with:
+          working-directory: ${{ env.FIXTURE }}
+          name: ${{ env.PREFIX }}-stale
+          passphrase: ${{ env.PASSPHRASE }}
+          allow-apply-from-any-ref: true
+      - working-directory: ${{ env.FIXTURE }}
+        run: |
+          terraform init -input=false
+          terraform apply -auto-approve -input=false -var value=a
+      - id: apply
+        continue-on-error: true
+        working-directory: ${{ env.FIXTURE }}
+        run: |
+          (sleep 8 && node "$GITHUB_WORKSPACE/test/scripts/push-direct.js" "$PREFIX-stale") &
+          terraform apply -auto-approve -input=false -var value=b -var sleep=25 2>&1 | tee "$RUNNER_TEMP/apply.log"
+          exit "${PIPESTATUS[0]}"
+      - name: The save is refused because a newer version appeared
+        run: |
+          [ "${{ steps.apply.outcome }}" = failure ]
+          grep -q 'HTTP error: 409' "$RUNNER_TEMP/apply.log"
+          grep -q 'state changed since it was loaded' "$RUNNER_TEMP"/actions-state/*.log
+
+  refs:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - run: test/scripts/install-tool.sh terraform
+      - uses: ./
+        with:
+          working-directory: ${{ env.FIXTURE }}
+          name: ${{ env.PREFIX }}-refs
+          passphrase: ${{ env.PASSPHRASE }}
+      - name: A pull request may plan
+        working-directory: ${{ env.FIXTURE }}
+        run: |
+          terraform init -input=false
+          terraform plan -input=false
+      - id: apply
+        continue-on-error: true
+        working-directory: ${{ env.FIXTURE }}
+        run: |
+          terraform apply -auto-approve -input=false 2>&1 | tee "$RUNNER_TEMP/apply.log"
+          exit "${PIPESTATUS[0]}"
+      - name: But may not apply
+        run: |
+          [ "${{ steps.apply.outcome }}" = failure ]
+          grep -q 'may only plan' "$RUNNER_TEMP/apply.log"
+
+  cleanup:
+    needs: [lifecycle-reload, wrong-passphrase, public-guard, backend-conflict, contention-verify, fail-fast, fail-fast-holder, crash-holder, crash-waiter, stale-save, refs]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - run: node test/scripts/cleanup.js "$PREFIX-"
