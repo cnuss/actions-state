@@ -1,0 +1,53 @@
+name: 'Terraform state on GitHub'
+description: >-
+  Terraform and OpenTofu state stored in GitHub Packages and locked with the
+  Actions cache. Add one step, then run terraform as usual.
+author: 'cnuss'
+
+inputs:
+  working-directory:
+    description: 'Root module directory. The backend override file is written here.'
+    required: false
+    default: '.'
+  name:
+    description: 'State name. Defaults to working-directory relative to the workspace ("root" for the workspace itself).'
+    required: false
+    default: ''
+  passphrase:
+    description: 'Encrypts state before it leaves the runner. Required when the repository or its state package is public. Pass it from a secret.'
+    required: false
+    default: ''
+  lock-timeout:
+    description: 'Seconds to wait for a lock held by another job. 0 fails at once.'
+    required: false
+    default: '600'
+  replace-backend:
+    description: 'Proceed even if the configuration declares a backend; the override replaces it.'
+    required: false
+    default: 'false'
+  allow-apply-from-any-ref:
+    description: 'Let refs other than the default branch apply and save state. Locks taken on other refs do not exclude each other.'
+    required: false
+    default: 'false'
+  github-token:
+    description: 'Token for the cache, packages and REST calls. Needs actions: write and packages: write.'
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  state-name:
+    description: 'The resolved state name.'
+  image:
+    description: 'The state package, ghcr.io/<owner>/<repo>/actions-state.'
+  address:
+    description: 'The local state URL Terraform uses.'
+
+runs:
+  using: 'node24'
+  main: 'index.js'
+  post: 'index.js'
+  post-if: always()
+
+branding:
+  icon: 'database'
+  color: 'purple'

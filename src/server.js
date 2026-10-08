@@ -253,4 +253,61 @@ function createApp({
   return { handle, loadLatest, releaseHeld, get held() { return held; } };
 }
 
-module.exports = { createApp };
+// Detached-process entry. Non-secret configuration arrives as
+// ACTIONS_STATE_CONFIG; secrets arrive as their own variables.
+async function start(env = process.env) {
+  const fs = require('fs');
+  const nodeHttp = require('http');
+  const { cacheClient, restClient, setDebug } = require('./core/http');
+  const { createLock } = require('./core/lock');
+  const { createStore } = require('./core/store');
+  const { getAdapter } = require('./adapters');
+
+  const cfg = JSON.parse(env.ACTIONS_STATE_CONFIG);
+  const log = (msg) => process.stdout.write(`${new Date().toISOString()} ${msg}\n`);
+  if (env.ACTIONS_STEP_DEBUG === 'true') setDebug(log);
+  const writeRunfile = (data) => {
+    const tmp = `${cfg.runfile}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify({ pid: process.pid, ...data }));
+    fs.renameSync(tmp, cfg.runfile);
+  };
+
+  const rest = restClient({ token: env.ACTIONS_STATE_TOKEN, apiUrl: cfg.apiUrl });
+  const lock = createLock({
+    twirp: cacheClient({ token: env.ACTIONS_RUNTIME_TOKEN, resultsUrl: env.ACTIONS_RESULTS_URL }),
+    rest, repository: cfg.repository, ref: cfg.ref, slug: cfg.slug, identity: cfg.identity, log,
+  });
+  const store = createStore({ registry: cfg.registry, image: cfg.image, token: env.ACTIONS_STATE_TOKEN });
+
+  let port = null;
+  const server = nodeHttp.createServer();
+  const app = createApp({
+    password: env.ACTIONS_STATE_PASSWORD, lock, store, adapter: getAdapter(cfg.adapter),
+    slug: cfg.slug, name: cfg.name, isDefaultRef: cfg.isDefaultRef, allowAnyRef: cfg.allowAnyRef,
+    lockTimeoutMs: cfg.lockTimeoutMs, passphrase: env.ACTIONS_STATE_PASSPHRASE || '', aad: cfg.aad, meta: cfg.meta, log,
+    onHeldChange: (h) => writeRunfile({ port, held: h && !h.virtual ? [h.entryId, h.holderId].filter(Boolean) : [] }),
+    onShutdown: () => setTimeout(() => process.exit(0), 50),
+  });
+  server.on('request', (req, res) => { app.handle(req, res); });
+
+  // Fail fast on a wrong passphrase, before Terraform runs.
+  try {
+    await app.loadLatest();
+  } catch (err) {
+    writeRunfile({ error: err.message });
+    throw err;
+  }
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  port = server.address().port;
+  writeRunfile({ port, held: [] });
+  log(`serving "${cfg.name}" on 127.0.0.1:${port}`);
+}
+
+module.exports = { createApp, start };
+
+if (require.main === module) {
+  start().catch((err) => {
+    process.stderr.write(`${err.stack || err}\n`);
+    process.exit(1);
+  });
+}
