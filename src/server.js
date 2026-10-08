@@ -159,7 +159,15 @@ function createApp({
       if (!writable) {
         const free = await lock.waitUntilFree({ waitMs: lockTimeoutMs, signal: abort.signal });
         if (abort.signal.aborted) return closed ? shuttingDown() : undefined;
-        if (!free) return sendJson(res, 423, holderInfo(await lock.readCurrent({ ref: meta.defaultRef })));
+        if (!free) {
+          log(`plan lock on "${name}": the default branch's lock is still held after ${lockTimeoutMs / 1000}s`);
+          let current;
+          try { current = await lock.readCurrent({ ref: meta.defaultRef }); } catch (err) {
+            log(`could not read the default branch's lock holder: ${err.message}`);
+            return sendJson(res, 423, refusal(info, `the lock is held on the default branch; its holder could not be read: ${err.message}`));
+          }
+          return sendJson(res, 423, holderInfo(current));
+        }
         held = { id: info.ID, info, virtual: true };
         log(`plan lock on "${name}" (${info.ID}), not shared with other refs`);
         return send(res, 200);

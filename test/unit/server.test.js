@@ -403,3 +403,17 @@ test('shutdown stops waiting for handlers after the drain cap', async () => {
   await save;
   await s.close();
 });
+
+test('a plan-only LOCK that times out and cannot read the holder is a 423, not a 500', async () => {
+  const lock = fakeLock();
+  lock.waitUntilFree = async () => false;
+  lock.readCurrent = async () => { throw new Error('listing cache entries: HTTP 503'); };
+  const s = await setup({ lock, isDefaultRef: false, meta: { runId: '9', sha: 'abc', ref: 'refs/pull/1/merge', defaultRef: 'refs/heads/main', source: 'https://github.com/o/r' } });
+  const r = await s.call('LOCK', '/lock', s.lockBody('p', 'OperationTypePlan'));
+  assert.equal(r.status, 423);
+  const body = JSON.parse(r.text);
+  assert.equal(body.ID, 'refused-by-actions-state');
+  assert.match(body.Info, /held on the default branch.*could not be read.*HTTP 503/);
+  assert.equal(s.app.held, null);
+  await s.close();
+});
