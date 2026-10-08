@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { resolveConfig, jobPassword, claimRunfile, waitForServer, preflightActions, preflightPackages, post } = require('../../index');
+const { resolveConfig, jobPassword, claimRunfile, waitForServer, preflightActions, preflightPackages, needsWritePreflight, post } = require('../../index');
 
 const baseEnv = {
   GITHUB_WORKSPACE: '/w', GITHUB_REPOSITORY: 'CNuss/Thing', GITHUB_REF: 'refs/heads/main', RUNNER_TEMP: '/tmp/rt',
@@ -133,4 +133,10 @@ test('post finishes every cleanup step when the fallback deletes fail', async ()
   assert.match(out, /server says hi/);
   assert.equal(fs.existsSync(runfile), false);
   assert.equal(fs.existsSync(path.join(workDir, 'actions_state_override.tf')), false);
+});
+
+test('write-permission preflights run only where the job may save', () => {
+  assert.equal(needsWritePreflight({ isDefaultRef: true, allowAnyRef: false }), true);
+  assert.equal(needsWritePreflight({ isDefaultRef: false, allowAnyRef: true }), true);
+  assert.equal(needsWritePreflight({ isDefaultRef: false, allowAnyRef: false }), false);
 });

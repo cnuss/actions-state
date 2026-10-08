@@ -108,6 +108,11 @@ async function preflightActions(rest, repository, onWarning = warn) {
   onWarning(`could not check for the actions: write permission: HTTP ${r.status}`);
 }
 
+// Plan-only jobs never save or take a real lock, so they need neither permission.
+function needsWritePreflight({ isDefaultRef, allowAnyRef }) {
+  return Boolean(isDefaultRef || allowAnyRef);
+}
+
 async function preflightPackages(store, onWarning = warn) {
   let ok;
   try {
@@ -144,8 +149,10 @@ async function main() {
     if (visibility === 'public') throw new Error(`ghcr.io/${cfg.image} is public: set the passphrase input from a secret to encrypt state`);
   }
   const job = await findSelfJob(rest, env);
-  await preflightActions(rest, cfg.repository);
-  await preflightPackages(createStore({ registry: REGISTRY, image: cfg.image, token: cfg.token }));
+  if (needsWritePreflight({ isDefaultRef, allowAnyRef: cfg.allowAnyRef })) {
+    await preflightActions(rest, cfg.repository);
+    await preflightPackages(createStore({ registry: REGISTRY, image: cfg.image, token: cfg.token }));
+  }
 
   fs.mkdirSync(cfg.runDir, { recursive: true });
   const runfile = claimRunfile(cfg.runDir, cfg.slug, cfg.name);
@@ -235,7 +242,7 @@ async function post({ env = process.env, print = log } = {}) {
   });
 }
 
-module.exports = { resolveConfig, jobPassword, claimRunfile, waitForServer, preflightActions, preflightPackages, post };
+module.exports = { resolveConfig, jobPassword, claimRunfile, waitForServer, preflightActions, preflightPackages, needsWritePreflight, post };
 
 if (require.main === module) {
   const run = process.env.STATE_post === 'true' ? post : main;
