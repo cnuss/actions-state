@@ -39,8 +39,9 @@ listed in `.git/info/exclude`.
   each one, so any version can be pulled back with standard OCI tools.
 - **Locks** are cache entries, the mechanism from
   [actions-mutex](https://github.com/cnuss/actions-mutex). A second job waits
-  for the lock (up to `lock-timeout`), and a lock left behind by a runner that
-  died is reclaimed about a minute after that job ends.
+  for the lock (up to `lock-timeout`). A lock left by a job whose runner died
+  is reclaimed by the next job waiting for it, which checks about once a
+  minute (a short `lock-timeout` gets one check at the end of its wait).
 - **Only the default branch writes.** Other refs (pull requests, feature
   branches) may `plan` against the current state; `apply` is refused unless
   `allow-apply-from-any-ref: true`. A save is also refused if a newer version
@@ -78,8 +79,10 @@ The state name becomes an OCI tag (lowercased, characters outside
 
 On the default branch, or with `allow-apply-from-any-ref`, the action checks
 `actions: write` and `packages: write` up front and fails before Terraform
-runs if either is missing. Plan-only jobs (other refs) need neither and work
-with a read-only token.
+runs if either is missing. Plan-only jobs (other refs) do not need the write
+permissions, but still need `actions: read`, `packages: read` and
+`contents: read`, because the action reads the repository, this job's id and
+the package.
 
 ## Outputs
 
@@ -128,9 +131,9 @@ Run once with `replace-backend: true` and `terraform init -migrate-state
 - Making a private repository public does not re-encrypt versions already
   stored. Delete the old plaintext versions or the package.
 - Tested on Linux (`ubuntu-latest`) runners only.
-- Changing the passphrase: pull the newest version with the old passphrase
-  (`terraform state pull > state.json`), change the secret, then
-  `terraform state push state.json`.
+- The passphrase cannot be changed in place: stored versions are decrypted
+  with the current secret, so a changed secret makes the state unreadable.
+  Keep the secret stable. Rotation is not supported yet.
 - A failed save leaves `errored.tfstate` in the working directory. To keep it,
   add `actions/upload-artifact` with `if: failure()`; it is plaintext.
 
@@ -138,6 +141,7 @@ Run once with `replace-backend: true` and `terraform init -migrate-state
 
 - Dependency-free: no `node_modules`, no bundling, no build step. Node 24.
 - The server log is printed in a collapsed group at the end of the job.
-- Per-request logging turns on with runner debug logging: re-run the job with
-  debug logging enabled, or set the `ACTIONS_STEP_DEBUG` secret. URLs are
-  logged without query strings.
+- Per-request logging of the action's outbound requests (cache, registry,
+  GitHub API) turns on with runner debug logging: re-run the job with debug
+  logging enabled, or set the `ACTIONS_STEP_DEBUG` secret. URLs are logged
+  without query strings.
