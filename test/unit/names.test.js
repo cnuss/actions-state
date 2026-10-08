@@ -50,3 +50,10 @@ test('image name and cache keys', () => {
   assert.equal(lockKey('infra-zone'), 'actions-state/infra-zone');
   assert.equal(holderKey('infra-zone', 42), 'actions-state/infra-zone/holder/42');
 });
+
+test('tagSlug: refuses slugs shaped like another state\'s per-serial tag', () => {
+  assert.throws(() => tagSlug('app.v2'), /per-serial tag.*different `name`/);
+  assert.throws(() => tagSlug('App.V10'), /per-serial tag/);
+  assert.equal(tagSlug('app.v2x'), 'app.v2x');
+  assert.equal(tagSlug('app.v'), 'app.v');
+});

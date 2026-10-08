@@ -7,7 +7,7 @@ const crypto = require('crypto');
 const { URL } = require('url');
 const box = require('./core/crypto');
 const { parseJson } = require('./core/http');
-const { annotationsFor, serialOf } = require('./core/store');
+const { annotationsFor, serialOf, PREFIX } = require('./core/store');
 
 // One try plus three retries.
 const PUSH_ATTEMPTS = 4;
@@ -60,8 +60,17 @@ function createApp({
     Version: '', Created: new Date().toISOString(), Path: name, Info: why,
   });
 
+  // Two names can share a tag slug; a version without the annotation is accepted.
+  function foreignOwner(resolved) {
+    const owner = resolved?.manifest?.annotations?.[`${PREFIX}.name`];
+    if (owner == null || owner === name) return null;
+    return `tag "${slug}" holds state "${owner}", not "${name}"; give one of them a different name`;
+  }
+
   async function loadLatest() {
     const resolved = await store.resolve(slug);
+    const foreign = foreignOwner(resolved);
+    if (foreign) throw new Error(foreign);
     if (!resolved) {
       loaded = { digest: null, serial: null };
       return null;
@@ -81,6 +90,8 @@ function createApp({
 
   async function save(bytes) {
     const current = await store.resolve(slug);
+    const foreign = foreignOwner(current);
+    if (foreign) return [409, foreign];
     const currentDigest = current ? current.digest : null;
     if (!loaded || loaded.digest !== currentDigest) {
       const was = loaded && loaded.serial !== null ? loaded.serial : 'none';

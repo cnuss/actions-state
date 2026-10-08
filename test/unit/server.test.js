@@ -340,3 +340,31 @@ test('a LOCK pending at shutdown is not granted', async () => {
   assert.equal((await s.call('LOCK', '/lock', s.lockBody('b'))).status, 423);
   await s.close();
 });
+
+test('loading refuses a tag that holds another state', async () => {
+  const store = fakeStore();
+  await store.push({ bytes: Buffer.from(stateJson(1)), mediaType: 'x', annotations: { [`${PREFIX}.name`]: 'other', [`${PREFIX}.serial`]: '1' }, tags: ['root'] });
+  const s = await setup({ store });
+  await assert.rejects(s.app.loadLatest(), /tag "root" holds state "other", not "root"; give one of them a different name/);
+  await s.close();
+});
+
+test('saving refuses a tag that holds another state', async () => {
+  const s = await setup();
+  await s.call('LOCK', '/lock', s.lockBody('a'));
+  await s.call('GET', '/state');
+  await s.store.push({ bytes: Buffer.from(stateJson(3)), mediaType: 'x', annotations: { [`${PREFIX}.name`]: 'other', [`${PREFIX}.serial`]: '3' }, tags: ['root'] });
+  const r = await s.call('POST', '/state?ID=a', stateJson(1));
+  assert.equal(r.status, 409);
+  assert.match(r.text, /tag "root" holds state "other", not "root"/);
+  assert.equal(s.store.versions.length, 1);
+  await s.close();
+});
+
+test('a version without a name annotation is accepted', async () => {
+  const store = fakeStore();
+  await store.push({ bytes: Buffer.from(stateJson(1)), mediaType: 'x', annotations: { [`${PREFIX}.serial`]: '1' }, tags: ['root'] });
+  const s = await setup({ store });
+  assert.equal((await s.app.loadLatest()).toString(), stateJson(1));
+  await s.close();
+});

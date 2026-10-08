@@ -22,6 +22,10 @@ function tagSlug(name) {
     const hash = crypto.createHash('sha256').update(name).digest('hex').slice(0, 10);
     slug = `${slug.slice(0, MAX_SLUG - 11)}-${hash}`;
   }
+  // Another state's per-serial tags are "<slug>.v<serial>".
+  if (/\.v\d+$/.test(slug)) {
+    throw new Error(`state name "${name}" gives the tag "${slug}", which reads as another state's per-serial tag; set a different \`name\``);
+  }
   return slug;
 }
 
