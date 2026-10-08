@@ -141,7 +141,7 @@ async function main() {
 
   const run = await waitForServer(runfile, logFile);
   const endpoint = `http://127.0.0.1:${run.port}`;
-  const health = await request('GET', `${endpoint}/health`, basicAuth(password));
+  const health = await request('GET', `${endpoint}/health`, basicAuth(password), null, { timeoutMs: 15_000 });
   if (health.status !== 200) throw new Error(`state server health check failed: HTTP ${health.status}`);
 
   adapter.wire(cfg.workingDirectory, { endpoint });
@@ -167,7 +167,7 @@ async function post() {
   let stopped = false;
   if (run.port && password) {
     try {
-      stopped = (await request('POST', `http://127.0.0.1:${run.port}/shutdown`, basicAuth(password))).status === 200;
+      stopped = (await request('POST', `http://127.0.0.1:${run.port}/shutdown`, basicAuth(password), null, { timeoutMs: 15_000 })).status === 200;
     } catch { /* server already gone */ }
   }
   if (!stopped) {

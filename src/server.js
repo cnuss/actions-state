@@ -265,7 +265,7 @@ async function start(env = process.env) {
 
   const cfg = JSON.parse(env.ACTIONS_STATE_CONFIG);
   const log = (msg) => process.stdout.write(`${new Date().toISOString()} ${msg}\n`);
-  if (env.ACTIONS_STEP_DEBUG === 'true') setDebug(log);
+  if (env.RUNNER_DEBUG === '1' || env.ACTIONS_STEP_DEBUG === 'true') setDebug(log);
   const writeRunfile = (data) => {
     const tmp = `${cfg.runfile}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify({ pid: process.pid, ...data }));

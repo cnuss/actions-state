@@ -19,7 +19,7 @@ function redactUrl(urlStr) {
 }
 
 // One request, one fresh socket: keep-alive pins a client to one cache replica.
-function request(method, urlStr, headers = {}, body = null) {
+function request(method, urlStr, headers = {}, body = null, { timeoutMs } = {}) {
   return new Promise((resolve, reject) => {
     const u = new URL(urlStr);
     const lib = u.protocol === 'http:' ? http : https;
@@ -43,6 +43,7 @@ function request(method, urlStr, headers = {}, body = null) {
       });
     });
     req.on('error', reject);
+    if (timeoutMs) req.setTimeout(timeoutMs, () => req.destroy(new Error(`timeout after ${timeoutMs} ms`)));
     if (data) req.write(data);
     req.end();
   });

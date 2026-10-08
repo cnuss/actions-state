@@ -86,3 +86,16 @@ test('parseJson returns {} for bad input', () => {
   assert.deepEqual(h.parseJson('nope'), {});
   assert.deepEqual(h.parseJson(''), {});
 });
+
+test('request times out when the server never answers', async () => {
+  const sockets = new Set();
+  const server = nodeHttp.createServer(() => {});
+  server.on('connection', (s) => { sockets.add(s); s.on('close', () => sockets.delete(s)); });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  try {
+    await assert.rejects(h.request('GET', `http://127.0.0.1:${server.address().port}/`, {}, null, { timeoutMs: 100 }), /timeout/);
+  } finally {
+    for (const s of sockets) s.destroy();
+    await new Promise((r) => server.close(r));
+  }
+});
