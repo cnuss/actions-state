@@ -186,45 +186,56 @@ async function main() {
   log(`[actions-state] serving "${cfg.name}" from ghcr.io/${cfg.image}:${cfg.slug} (${mode}) at ${endpoint}`);
 }
 
-async function post() {
-  const env = process.env;
+// Every step runs even when an earlier one fails.
+async function post({ env = process.env, print = log } = {}) {
+  const attempt = async (what, fn) => {
+    try { await fn(); } catch (err) { print(`::warning::[actions-state] ${what} failed: ${err.message}`); }
+  };
   const runfile = env.STATE_runfile;
-  if (env.STATE_working_directory) getAdapter('terraform').unwire(env.STATE_working_directory);
-  if (!runfile || !fs.existsSync(runfile)) return;
 
-  let run = {};
-  try { run = JSON.parse(fs.readFileSync(runfile, 'utf8') || '{}'); } catch { /* server never wrote it */ }
-  let password = '';
-  try { password = fs.readFileSync(path.join(path.dirname(runfile), 'password'), 'utf8'); } catch { /* main failed early */ }
+  if (runfile && fs.existsSync(runfile)) {
+    let run = {};
+    try { run = JSON.parse(fs.readFileSync(runfile, 'utf8') || '{}'); } catch { /* server never wrote it */ }
+    let password = '';
+    try { password = fs.readFileSync(path.join(path.dirname(runfile), 'password'), 'utf8'); } catch { /* main failed early */ }
 
-  let stopped = false;
-  if (run.port && password) {
-    try {
-      stopped = (await request('POST', `http://127.0.0.1:${run.port}/shutdown`, basicAuth(password), null, { timeoutMs: SHUTDOWN_TIMEOUT_MS })).status === 200;
-    } catch { /* server already gone */ }
-  }
-  if (!stopped) {
-    const held = run.held || [];
-    if (held.length) {
+    let stopped = false;
+    if (run.port && password) {
+      try {
+        stopped = (await request('POST', `http://127.0.0.1:${run.port}/shutdown`, basicAuth(password), null, { timeoutMs: SHUTDOWN_TIMEOUT_MS })).status === 200;
+      } catch { /* server already gone */ }
+    }
+    if (!stopped) {
       const rest = restClient({ token: input(env, 'github-token'), apiUrl: env.GITHUB_API_URL || 'https://api.github.com' });
-      for (const id of held) {
-        const r = await rest('DELETE', `/repos/${env.GITHUB_REPOSITORY}/actions/caches/${id}`);
-        log(`[actions-state] deleted lock entry ${id}: HTTP ${r.status}`);
+      for (const id of run.held || []) {
+        await attempt(`deleting lock entry ${id}`, async () => {
+          const r = await rest('DELETE', `/repos/${env.GITHUB_REPOSITORY}/actions/caches/${id}`);
+          print(`[actions-state] deleted lock entry ${id}: HTTP ${r.status}`);
+        });
+      }
+      if (run.pid) {
+        await attempt(`stopping server process ${run.pid}`, () => {
+          try { process.kill(run.pid, 'SIGKILL'); } catch (err) { if (err.code !== 'ESRCH') throw err; }
+        });
       }
     }
-    if (run.pid) { try { process.kill(run.pid, 'SIGKILL'); } catch { /* already exited */ } }
+    await attempt('removing the runfile', () => fs.rmSync(runfile, { force: true }));
   }
-  fs.rmSync(runfile, { force: true });
+
+  if (env.STATE_working_directory) {
+    await attempt('removing the backend override', () => getAdapter('terraform').unwire(env.STATE_working_directory));
+  }
 
   const logFile = env.STATE_log_file;
-  if (logFile && fs.existsSync(logFile)) {
-    log('::group::actions-state server log');
-    log(fs.readFileSync(logFile, 'utf8'));
-    log('::endgroup::');
-  }
+  await attempt('printing the server log', () => {
+    if (!logFile || !fs.existsSync(logFile)) return;
+    print('::group::actions-state server log');
+    print(fs.readFileSync(logFile, 'utf8'));
+    print('::endgroup::');
+  });
 }
 
-module.exports = { resolveConfig, jobPassword, claimRunfile, waitForServer, preflightActions, preflightPackages };
+module.exports = { resolveConfig, jobPassword, claimRunfile, waitForServer, preflightActions, preflightPackages, post };
 
 if (require.main === module) {
   const run = process.env.STATE_post === 'true' ? post : main;

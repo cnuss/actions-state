@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { resolveConfig, jobPassword, claimRunfile, waitForServer, preflightActions, preflightPackages } = require('../../index');
+const { resolveConfig, jobPassword, claimRunfile, waitForServer, preflightActions, preflightPackages, post } = require('../../index');
 
 const baseEnv = {
   GITHUB_WORKSPACE: '/w', GITHUB_REPOSITORY: 'CNuss/Thing', GITHUB_REF: 'refs/heads/main', RUNNER_TEMP: '/tmp/rt',
@@ -107,4 +107,30 @@ test('preflightPackages passes, fails on a refused push, and warns on anything e
   await preflightPackages({ canPush: async () => { throw new Error('HTTP 502'); } }, (m) => warnings.push(m));
   assert.equal(warnings.length, 1);
   assert.match(warnings[0], /HTTP 502/);
+});
+
+test('post finishes every cleanup step when the fallback deletes fail', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'actions-state-post-'));
+  const runDir = path.join(dir, 'run');
+  const workDir = path.join(dir, 'work');
+  fs.mkdirSync(runDir);
+  fs.mkdirSync(workDir);
+  const runfile = path.join(runDir, 'root.json');
+  fs.writeFileSync(runfile, JSON.stringify({ held: ['11', '12'] }));
+  fs.writeFileSync(path.join(workDir, 'actions_state_override.tf'), 'terraform {}\n');
+  fs.writeFileSync(path.join(runDir, 'root.log'), 'server says hi');
+  const printed = [];
+  await post({
+    env: {
+      STATE_runfile: runfile, STATE_working_directory: workDir, STATE_log_file: path.join(runDir, 'root.log'),
+      GITHUB_API_URL: 'http://127.0.0.1:1', GITHUB_REPOSITORY: 'o/r', 'INPUT_GITHUB-TOKEN': 'gh',
+    },
+    print: (m) => printed.push(m),
+  });
+  const out = printed.join('\n');
+  assert.match(out, /deleting lock entry 11 failed/);
+  assert.match(out, /deleting lock entry 12 failed/);
+  assert.match(out, /server says hi/);
+  assert.equal(fs.existsSync(runfile), false);
+  assert.equal(fs.existsSync(path.join(workDir, 'actions_state_override.tf')), false);
 });
