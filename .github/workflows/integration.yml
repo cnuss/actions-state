@@ -11,6 +11,11 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# Runs share the GHCR package and cache scope; let one finish before the next.
+concurrency:
+  group: integration
+  cancel-in-progress: false
+
 permissions:
   actions: write
   packages: write
@@ -28,6 +33,7 @@ env:
 jobs:
   lifecycle:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -51,6 +57,7 @@ jobs:
   lifecycle-reload:
     needs: lifecycle
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -75,6 +82,7 @@ jobs:
   wrong-passphrase:
     needs: lifecycle
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - id: wrong
@@ -98,6 +106,7 @@ jobs:
 
   public-guard:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - id: guard
@@ -120,6 +129,7 @@ jobs:
 
   backend-conflict:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - run: test/scripts/install-tool.sh terraform
@@ -156,6 +166,7 @@ jobs:
 
   contention-seed:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - run: test/scripts/install-tool.sh terraform
@@ -173,6 +184,7 @@ jobs:
   contention:
     needs: contention-seed
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -195,12 +207,14 @@ jobs:
   contention-verify:
     needs: contention
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - run: node test/scripts/inspect.js "$PREFIX-contention" --expect-encrypted --min-serial 4
 
   fail-fast-holder:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - run: test/scripts/install-tool.sh terraform
@@ -219,6 +233,7 @@ jobs:
 
   fail-fast:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - run: test/scripts/install-tool.sh terraform
@@ -247,6 +262,7 @@ jobs:
 
   crash-holder:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     # Killing the runner fails this job on purpose; the waiter is the test.
     continue-on-error: true
     steps:
@@ -269,6 +285,7 @@ jobs:
 
   crash-waiter:
     runs-on: ubuntu-latest
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - run: test/scripts/install-tool.sh terraform
@@ -297,6 +314,7 @@ jobs:
 
   stale-save:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - run: test/scripts/install-tool.sh terraform
@@ -327,6 +345,7 @@ jobs:
   refs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - run: test/scripts/install-tool.sh terraform
@@ -355,6 +374,7 @@ jobs:
     needs: [lifecycle-reload, wrong-passphrase, public-guard, backend-conflict, contention-verify, fail-fast, fail-fast-holder, crash-holder, crash-waiter, stale-save, refs]
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - run: node test/scripts/cleanup.js "$PREFIX-"
