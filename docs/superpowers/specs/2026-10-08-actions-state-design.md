@@ -1,7 +1,7 @@
 # actions-state design
 
 Date: 2026-10-08
-Status: draft for review
+Status: approved 2026-10-08
 
 ## Goal
 
@@ -269,6 +269,7 @@ token.
 | Cache service down | `LOCK` returns 503; Terraform retries twice, then fails to acquire the lock. |
 | Server dies mid-job | Terraform gets connection errors. Post deletes the entries listed in `<slug>.json`. |
 | Runner dies | Post never runs; the next waiter reclaims the lock once the job is marked completed. |
+| Runner dies between reserving and finalizing the lock (~300 ms window) | Documented limit, as in actions-mutex: the unfinalized reservation keeps blocking the key for at least 90 minutes and is invisible to the REST API, so it cannot be reclaimed or deleted. |
 | Wrong or missing passphrase on encrypted state | Main step fails before Terraform runs. |
 | Public repo or package without a passphrase | Main step fails with instructions. |
 | Declared backend | Main step fails unless `replace-backend: true`. |
