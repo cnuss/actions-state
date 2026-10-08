@@ -86,10 +86,15 @@ jobs:
           passphrase: not-the-passphrase
           allow-apply-from-any-ref: true
       - name: The action must fail before Terraform runs
-        if: steps.wrong.outcome != 'failure'
         run: |
-          echo "::error::a wrong passphrase was accepted"
-          exit 1
+          if [ "${{ steps.wrong.outcome }}" != failure ]; then
+            echo "::error::a wrong passphrase was accepted"
+            exit 1
+          fi
+          if ! grep -q 'decryption failed' "$RUNNER_TEMP"/actions-state/*.log; then
+            echo "::error::the action failed, but not because decryption failed"
+            exit 1
+          fi
 
   public-guard:
     runs-on: ubuntu-latest
@@ -103,10 +108,15 @@ jobs:
           name: ${{ env.PREFIX }}-guard
           allow-apply-from-any-ref: true
       - name: A public repo without a passphrase must be refused
-        if: steps.guard.outcome != 'failure'
         run: |
-          echo "::error::state would have been stored unencrypted in a public package"
-          exit 1
+          if [ "${{ steps.guard.outcome }}" != failure ]; then
+            echo "::error::state would have been stored unencrypted in a public package"
+            exit 1
+          fi
+          if node test/scripts/inspect.js "$PREFIX-guard"; then
+            echo "::error::the refused run stored state anyway"
+            exit 1
+          fi
 
   backend-conflict:
     runs-on: ubuntu-latest
@@ -122,10 +132,15 @@ jobs:
           passphrase: ${{ env.PASSPHRASE }}
           allow-apply-from-any-ref: true
       - name: A declared backend must be refused by default
-        if: steps.refused.outcome != 'failure'
         run: |
-          echo "::error::the s3 backend was silently replaced"
-          exit 1
+          if [ "${{ steps.refused.outcome }}" != failure ]; then
+            echo "::error::the s3 backend was silently replaced"
+            exit 1
+          fi
+          if [ -e test/fixtures/s3-backend/actions_state_override.tf ]; then
+            echo "::error::the refused run left an override file behind"
+            exit 1
+          fi
       - uses: ./
         with:
           working-directory: test/fixtures/s3-backend
@@ -275,6 +290,10 @@ jobs:
           start=$(date +%s)
           terraform apply -auto-approve -input=false -var value=c
           echo "waited and applied in $(( $(date +%s) - start ))s" | tee -a "$GITHUB_STEP_SUMMARY"
+          if ! grep -q 'ended without releasing; reclaiming' "$RUNNER_TEMP"/actions-state/*.log; then
+            echo "::error::the lock was not reclaimed from the crashed holder"
+            exit 1
+          fi
 
   stale-save:
     runs-on: ubuntu-latest
