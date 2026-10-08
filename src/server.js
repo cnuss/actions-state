@@ -34,6 +34,8 @@ function createApp({
   let locking = null;  // lock info of a LOCK still waiting
   let loaded = null;   // { digest, serial } of the version Terraform last read
   let cache = null;    // { digest, serial, bytes } with bytes decrypted
+  let pendingAbort = null; // AbortController of the LOCK still waiting
+  let closed = false;      // set by /shutdown; no lock is granted after it
 
   function authorized(req) {
     const header = req.headers.authorization || '';
@@ -113,15 +115,18 @@ function createApp({
   async function releaseHeld() {
     if (!held) return;
     const h = held;
-    held = null;
     if (!h.virtual) await lock.release(h);
-    onHeldChange(null);
+    if (held === h) {
+      held = null;
+      onHeldChange(null);
+    }
     log(`unlocked "${name}" (${h.id})`);
   }
 
   async function lockState(res, body) {
     const info = parseJson(body.toString('utf8'));
     if (!info.ID) return send(res, 400, 'lock request has no ID');
+    if (closed) return sendJson(res, 423, refusal(info, 'state server is shutting down'));
     if (held) return held.id === info.ID ? send(res, 200) : sendJson(res, 423, held.info);
     if (locking) return sendJson(res, 423, locking);
     if (!writable && info.Operation !== 'OperationTypePlan') {
@@ -131,12 +136,14 @@ function createApp({
     }
 
     const abort = new AbortController();
+    const shuttingDown = () => sendJson(res, 423, refusal(info, 'state server is shutting down'));
     res.on('close', () => { if (!res.writableEnded) abort.abort(); });
+    pendingAbort = abort;
     locking = info;
     try {
       if (!writable) {
         const free = await lock.waitUntilFree({ waitMs: lockTimeoutMs, signal: abort.signal });
-        if (abort.signal.aborted) return undefined;
+        if (abort.signal.aborted) return closed ? shuttingDown() : undefined;
         if (!free) return sendJson(res, 423, holderInfo(await lock.readCurrent({ ref: meta.defaultRef })));
         held = { id: info.ID, info, virtual: true };
         log(`plan lock on "${name}" (${info.ID}), not shared with other refs`);
@@ -144,20 +151,21 @@ function createApp({
       }
       const got = await lock.acquire({ info, waitMs: lockTimeoutMs, signal: abort.signal });
       if (!got.ok) {
-        if (got.aborted) return undefined;
+        if (got.aborted) return closed ? shuttingDown() : undefined;
         log(`lock on "${name}" still held after ${lockTimeoutMs / 1000}s`);
         return sendJson(res, 423, holderInfo(got.current));
       }
-      if (abort.signal.aborted) {
-        await lock.release(got);
-        return undefined;
-      }
       held = { id: info.ID, info, virtual: false, entryId: got.entryId, holderId: got.holderId };
       onHeldChange(held);
+      if (abort.signal.aborted || closed) {
+        await releaseHeld();
+        return closed ? shuttingDown() : undefined;
+      }
       log(`locked "${name}" for ${info.Operation} (${info.ID})`);
       return send(res, 200);
     } finally {
       locking = null;
+      if (pendingAbort === abort) pendingAbort = null;
     }
   }
 
@@ -201,15 +209,23 @@ function createApp({
   }
 
   async function handle(req, res) {
-    const url = new URL(req.url, 'http://localhost');
-    const route = `${req.method} ${url.pathname}`;
+    let route = req.method;
     try {
+      let url;
+      try {
+        url = new URL(req.url, 'http://localhost');
+      } catch {
+        return send(res, 400, 'malformed request target');
+      }
+      route = `${req.method} ${url.pathname}`;
       const body = await readBody(req);
       if (!authorized(req)) return send(res, 401, 'unauthorized', { 'WWW-Authenticate': 'Basic realm="actions-state"' });
       switch (route) {
         case 'GET /health':
           return send(res, 200, 'ok');
         case 'POST /shutdown':
+          closed = true;
+          if (pendingAbort) pendingAbort.abort();
           await releaseHeld();
           send(res, 200, 'bye');
           return onShutdown();
@@ -218,13 +234,13 @@ function createApp({
           return bytes ? send(res, 200, bytes, { 'Content-Type': 'application/json' }) : send(res, 404, 'no state yet');
         }
         case 'POST /state':
-          return postState(res, url.searchParams.get('ID'), body);
+          return await postState(res, url.searchParams.get('ID'), body);
         case 'DELETE /state':
           return send(res, 405, 'deleting state is not supported');
         case 'LOCK /lock':
-          return lockState(res, body);
+          return await lockState(res, body);
         case 'UNLOCK /lock':
-          return unlockState(res, body);
+          return await unlockState(res, body);
         default:
           return send(res, 404, 'not found');
       }

@@ -276,3 +276,67 @@ test('a second LOCK while one is waiting is refused', async () => {
   assert.equal((await first).status, 200);
   await s.close();
 });
+
+test('a failed release keeps the lock held and can be retried', async () => {
+  const lock = fakeLock();
+  const realRelease = lock.release;
+  let failures = 1;
+  lock.release = async (h) => {
+    if (failures-- > 0) throw new Error('429');
+    return realRelease(h);
+  };
+  const s = await setup({ lock });
+  await s.call('LOCK', '/lock', s.lockBody('a'));
+  assert.equal((await s.call('UNLOCK', '/lock', s.lockBody('a'))).status, 500);
+  assert.equal(s.app.held.id, 'a');
+  assert.equal((await s.call('UNLOCK', '/lock', s.lockBody('a'))).status, 200);
+  assert.deepEqual(lock.state.released, ['e1']);
+  assert.equal(s.app.held, null);
+  await s.close();
+});
+
+test('shutdown after a failed UNLOCK still releases', async () => {
+  const lock = fakeLock();
+  const realRelease = lock.release;
+  let failures = 1;
+  lock.release = async (h) => {
+    if (failures-- > 0) throw new Error('503');
+    return realRelease(h);
+  };
+  const s = await setup({ lock });
+  await s.call('LOCK', '/lock', s.lockBody('a'));
+  assert.equal((await s.call('UNLOCK', '/lock', s.lockBody('a'))).status, 500);
+  assert.equal((await s.call('POST', '/shutdown')).status, 200);
+  assert.deepEqual(lock.state.released, ['e1']);
+  assert.equal(s.events.held.at(-1), null);
+  await s.close();
+});
+
+test('a malformed request target is a 400, not a crash', async () => {
+  const s = await setup();
+  const out = {};
+  const res = {
+    writableEnded: false, destroyed: false,
+    writeHead(status) { out.status = status; },
+    end() { this.writableEnded = true; },
+  };
+  await s.app.handle({ url: 'http://[', method: 'GET', headers: {}, on() {} }, res);
+  assert.equal(out.status, 400);
+  await s.close();
+});
+
+test('a LOCK pending at shutdown is not granted', async () => {
+  let finish;
+  const lock = fakeLock();
+  lock.acquire = () => new Promise((resolve) => { finish = () => resolve({ ok: true, entryId: 'late', holderId: 'h' }); });
+  const s = await setup({ lock });
+  const first = s.call('LOCK', '/lock', s.lockBody('a'));
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal((await s.call('POST', '/shutdown')).status, 200);
+  finish();
+  assert.equal((await first).status, 423);
+  assert.deepEqual(lock.state.released, ['late']);
+  assert.equal(s.app.held, null);
+  assert.equal((await s.call('LOCK', '/lock', s.lockBody('b'))).status, 423);
+  await s.close();
+});
