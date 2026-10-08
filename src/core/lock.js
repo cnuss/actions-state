@@ -66,23 +66,26 @@ function createLock({
   }
 
   // The holder record is what makes an abandoned lock reclaimable, so it is
-  // worth waiting out a throttled window for.
+  // worth waiting out a throttled window for. Never throws: the lock is
+  // already held, and an exception here would leak it.
   async function publishHolder(entryId, record) {
     const k = holderKey(slug, entryId);
-    let create;
-    for (let i = 1; i <= t.holderPublishAttempts; i += 1) {
-      create = await twirp('CreateCacheEntry', { key: k, version: versionFor(k) });
-      const url = create.json.signed_upload_url || create.json.signedUploadUrl;
-      if (url) {
-        try { return await publish(k, url, record); } catch (err) {
-          log(`could not publish holder record ${k}: ${err.message}`);
-          return '';
-        }
+    let why;
+    try {
+      for (let i = 1; i <= t.holderPublishAttempts; i += 1) {
+        const create = await twirp('CreateCacheEntry', { key: k, version: versionFor(k) });
+        const url = create.json.signed_upload_url || create.json.signedUploadUrl;
+        if (url) return await publish(k, url, record);
+        why = create.text;
+        if (!http.isThrottled(create)) break;
+        await sleep(http.retryAfterMs(create.headers, THROTTLE_FALLBACK_MS) + random() * t.pollJitterMs);
       }
-      if (!http.isThrottled(create)) break;
-      await sleep(http.retryAfterMs(create.headers, THROTTLE_FALLBACK_MS) + random() * t.pollJitterMs);
+    } catch (err) {
+      why = err.message;
     }
-    log(`could not publish holder record ${k}; if this job dies holding the lock it must be deleted by hand: ${create.text}`);
+    try {
+      log(`could not publish holder record ${k}; if this job dies holding the lock it must be deleted by hand: ${why}`);
+    } catch { /* logging must not leak the lock either */ }
     return '';
   }
 
@@ -118,6 +121,7 @@ function createLock({
     const start = now();
     let lastCreate = -Infinity;
     let lastReclaim = start;
+    let reclaimChecked = false;
     let looksFree = true;
     let delay = t.pollDelayMs;
 
@@ -155,9 +159,15 @@ function createLock({
       delay = throttled ? Math.min(delay * 2, t.maxPollDelayMs) : Math.max(delay * 0.9, t.pollDelayMs);
       if (now() - lastReclaim >= t.reclaimIntervalMs) {
         lastReclaim = now();
+        reclaimChecked = true;
         if (await reclaimIfAbandoned()) { looksFree = true; continue; }
       }
       if (now() - start >= waitMs) {
+        // A wait shorter than reclaimIntervalMs still gets one check.
+        if (!reclaimChecked) {
+          reclaimChecked = true;
+          if (await reclaimIfAbandoned()) { looksFree = true; continue; }
+        }
         try { return { ok: false, current: await readCurrent() }; } catch (err) {
           log(`could not read the current holder: ${err.message}`);
           return { ok: false, current: null };

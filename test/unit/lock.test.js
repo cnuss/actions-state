@@ -166,3 +166,28 @@ test('REST failures while waiting end as not acquired, not an exception', async 
   const got = await makeLock(fake, c, 2, { timing: { reclaimIntervalMs: 5000 } }).acquire({ info: { ID: 'b' }, waitMs: 30_000 });
   assert.deepEqual(got, { ok: false, current: null });
 });
+
+test('a network error publishing the holder record still returns a releasable lock', async () => {
+  const fake = createFakeCache();
+  const twirp = async (method, body) => {
+    if (method === 'CreateCacheEntry' && body.key.includes('/holder/')) throw new Error('socket hang up');
+    return fake.twirp(method, body);
+  };
+  const lock = makeLock(fake, clock(), 1, { twirp });
+  const got = await lock.acquire({ info: { ID: 'a' }, waitMs: 0 });
+  assert.equal(got.ok, true);
+  assert.equal(got.holderId, '');
+  await lock.release(got);
+  assert.deepEqual(fake.finalizedKeys(), []);
+  assert.equal(await lock.readCurrent(), null);
+});
+
+test('lock-timeout 0 still reclaims a lock whose holder job has completed', async () => {
+  const fake = createFakeCache();
+  const c = clock();
+  await makeLock(fake, c, 7).acquire({ info: { ID: 'a' }, waitMs: 0 });
+  fake.setJob(7, 'completed');
+  const got = await makeLock(fake, c, 8).acquire({ info: { ID: 'b' }, waitMs: 0 });
+  assert.equal(got.ok, true);
+  assert.equal((await makeLock(fake, c, 8).readCurrent()).holder.lockInfo.ID, 'b');
+});
