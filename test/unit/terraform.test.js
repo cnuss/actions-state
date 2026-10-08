@@ -105,3 +105,14 @@ test('stateMeta throws on JSON that is not a state object', () => {
     assert.throws(() => tf.stateMeta(Buffer.from(body)), /not a state file/, body);
   }
 });
+
+test('detects unquoted backend labels and a cloud block right after a brace', () => {
+  const dir = tmpdir({
+    'a.tf': 'terraform {\n  backend s3 {\n    bucket = "b"\n  }\n}\n',
+    'b.tf': 'terraform {cloud {\n    organization = "o"\n  }\n}\n',
+    'c.tf': 'terraform { backend "gcs" {} }\n',
+  });
+  assert.deepEqual(tf.findBackends(dir), [
+    { file: 'a.tf', type: 's3' }, { file: 'b.tf', type: 'cloud' }, { file: 'c.tf', type: 'gcs' },
+  ]);
+});

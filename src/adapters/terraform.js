@@ -69,8 +69,8 @@ function backendsIn(file, text) {
     ]);
   }
   return terraformBlocks(stripComments(text)).flatMap((body) => {
-    const found = [...body.matchAll(/\bbackend\s+"([^"]+)"\s*\{/g)].map((x) => x[1]);
-    if (/(^|\s)cloud\s*\{/.test(body)) found.push('cloud');
+    const found = [...body.matchAll(/\bbackend\s+(?:"([^"]+)"|([A-Za-z_][\w-]*))\s*\{/g)].map((x) => x[1] ?? x[2]);
+    if (/(^|[\s{])cloud\s*\{/.test(body)) found.push('cloud');
     return found;
   });
 }
