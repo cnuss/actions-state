@@ -348,3 +348,13 @@ Actions restricted to GitHub-owned actions and `cnuss/*`.
 - Locks that exclude other refs.
 - Terraform workspaces (the HTTP backend supports only `default`).
 - GitHub Enterprise Server.
+
+## Spike results
+
+Run: https://github.com/cnuss/actions-test/actions/runs/37812205881 (branch `mutex-spike` in cnuss/actions-test, all four jobs succeeded).
+
+- GHCR: PASS. Nested name `cnuss/actions-test/actions-state-spike`, custom `artifactType` `application/vnd.cnuss.actions-state.v1` and layer type accepted; `PUT spike-root.v7` and `PUT spike-root` both HTTP 201; tags list shows both; blob GET is HTTP 307 to pkg-containers.githubusercontent.com and `-L` returns the state JSON. (https://github.com/cnuss/actions-test/actions/runs/37812205881)
+- Package visibility via GITHUB_TOKEN: PASS. `users:` HTTP 200 with `"visibility":"public"`; `orgs:` HTTP 404 (owner is a user, not an org). Look up `users` first and fall back to `orgs`. (https://github.com/cnuss/actions-test/actions/runs/37812205881)
+- Long LOCK, terraform 1.16.5: PASS. LOCK held 300 s; plan printed only "Acquiring state lock. This may take a few moments...", then proceeded; waited 300s, no timeout or retry message. (https://github.com/cnuss/actions-test/actions/runs/37812205881)
+- Long LOCK, tofu 1.13.1: PASS. Same behavior; waited 300s, no timeout or retry message. (https://github.com/cnuss/actions-test/actions/runs/37812205881)
+- Detached server: PASS. `main: server on 38671`, `alive pid=2076` in two later steps, `post: server stopped`. (https://github.com/cnuss/actions-test/actions/runs/37812205881)
