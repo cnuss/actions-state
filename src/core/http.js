@@ -7,19 +7,20 @@ const { URL } = require('url');
 let debug = () => {};
 function setDebug(fn) { debug = fn; }
 
-// Strip Azure SAS secrets before logging URLs.
+// Query strings can carry SAS signatures and tokens; log without them.
 function redactUrl(urlStr) {
   try {
     const u = new URL(urlStr);
-    for (const p of ['sig', 'skoid', 'sktid']) {
-      if (u.searchParams.has(p)) u.searchParams.set(p, 'REDACTED');
-    }
-    return `${u.origin}${u.pathname}${u.search}`;
+    return `${u.origin}${u.pathname}`;
   } catch { return urlStr; }
 }
 
+const DEFAULT_TIMEOUT_MS = 60_000;
+const BLOB_TIMEOUT_MS = 300_000;
+
 // One request, one fresh socket: keep-alive pins a client to one cache replica.
-function request(method, urlStr, headers = {}, body = null, { timeoutMs } = {}) {
+// timeoutMs bounds socket inactivity; 0 disables it.
+function request(method, urlStr, headers = {}, body = null, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
   return new Promise((resolve, reject) => {
     const u = new URL(urlStr);
     const lib = u.protocol === 'http:' ? http : https;
@@ -32,6 +33,7 @@ function request(method, urlStr, headers = {}, body = null, { timeoutMs } = {}) 
       headers: { Connection: 'close', ...headers },
       agent: false,
     };
+    if (timeoutMs) opts.timeout = timeoutMs;
     if (data) opts.headers['Content-Length'] = data.length;
     const req = lib.request(opts, (res) => {
       const chunks = [];
@@ -43,7 +45,7 @@ function request(method, urlStr, headers = {}, body = null, { timeoutMs } = {}) 
       });
     });
     req.on('error', reject);
-    if (timeoutMs) req.setTimeout(timeoutMs, () => req.destroy(new Error(`timeout after ${timeoutMs} ms`)));
+    req.on('timeout', () => req.destroy(new Error(`timeout after ${timeoutMs} ms`)));
     if (data) req.write(data);
     req.end();
   });
@@ -96,13 +98,16 @@ function restClient({ token, apiUrl = 'https://api.github.com' }) {
 // Signed cache-blob URLs.
 const blobs = {
   async put(url, bytes) {
-    const r = await request('PUT', url, { 'x-ms-blob-type': 'BlockBlob', 'Content-Type': 'application/octet-stream' }, bytes);
+    const r = await request('PUT', url, { 'x-ms-blob-type': 'BlockBlob', 'Content-Type': 'application/octet-stream' }, bytes, { timeoutMs: BLOB_TIMEOUT_MS });
     if (r.status < 200 || r.status >= 300) throw new Error(`blob upload failed: HTTP ${r.status}`);
   },
   async get(url) {
-    const r = await request('GET', url);
+    const r = await request('GET', url, {}, null, { timeoutMs: BLOB_TIMEOUT_MS });
     return r.status === 200 ? r.buffer : null;
   },
 };
 
-module.exports = { request, parseJson, isThrottled, retryAfterMs, redactUrl, setDebug, cacheClient, restClient, blobs };
+module.exports = {
+  DEFAULT_TIMEOUT_MS, BLOB_TIMEOUT_MS,
+  request, parseJson, isThrottled, retryAfterMs, redactUrl, setDebug, cacheClient, restClient, blobs,
+};

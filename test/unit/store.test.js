@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createStore, annotationsFor, serialOf, digestOf, EMPTY, ARTIFACT_TYPE, PREFIX } = require('../../src/core/store');
 const { startFakeRegistry } = require('../fakes/registry');
+const http = require('../../src/core/http');
 
 const LAYER = 'application/vnd.cnuss.actions-state.tfstate.v1';
 const annotations = (serial) => annotationsFor({
@@ -62,4 +63,20 @@ test('server errors are retryable and client errors are not', async () => {
 
 test('serialOf is null without the annotation', () => {
   assert.equal(serialOf({ annotations: {} }), null);
+});
+
+test('blob uploads and downloads use the blob timeout', async (t) => {
+  const reg = await startFakeRegistry();
+  t.after(() => reg.close());
+  const calls = [];
+  const request = (method, url, headers, body, opts) => {
+    calls.push({ method, path: new URL(url).pathname, timeoutMs: opts && opts.timeoutMs });
+    return http.request(method, url, headers, body, opts);
+  };
+  const store = createStore({ registry: reg.url, image: 'o/r/actions-state', token: 'gh', request });
+  await store.push({ bytes: Buffer.from('{"serial":1}'), mediaType: LAYER, annotations: annotations(1), tags: ['root'] });
+  await store.pull(await store.resolve('root'));
+  const blobCalls = calls.filter((c) => (c.method === 'PUT' && c.path.includes('/blobs/uploads/')) || (c.method === 'GET' && /\/blobs\/|_redirected/.test(c.path)));
+  assert.equal(blobCalls.length, 4);
+  for (const c of blobCalls) assert.equal(c.timeoutMs, 300_000, `${c.method} ${c.path}`);
 });

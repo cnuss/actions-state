@@ -78,11 +78,11 @@ function createStore({ registry = 'https://ghcr.io', image, token, request = htt
     return t;
   }
 
-  async function send(method, path, headers = {}, body = null) {
+  async function send(method, path, headers = {}, body = null, opts) {
     const url = path.startsWith('http') ? path : `${base}${path}`;
     const once = async () => {
       if (!bearer) bearer = await exchange();
-      try { return await request(method, url, { Authorization: `Bearer ${bearer}`, ...headers }, body); }
+      try { return await request(method, url, { Authorization: `Bearer ${bearer}`, ...headers }, body, opts); }
       catch (err) { throw storeError(`${method} ${path}: ${err.message}`, null); }
     };
     let res = await once();
@@ -100,9 +100,10 @@ function createStore({ registry = 'https://ghcr.io', image, token, request = htt
   async function pull(resolved) {
     const layer = resolved.manifest.layers && resolved.manifest.layers[0];
     if (!layer) throw storeError(`manifest ${resolved.digest} has no layer`, { status: 400 });
-    let res = await send('GET', `/v2/${image}/blobs/${layer.digest}`);
+    const blobOpts = { timeoutMs: http.BLOB_TIMEOUT_MS };
+    let res = await send('GET', `/v2/${image}/blobs/${layer.digest}`, {}, null, blobOpts);
     if (res.status >= 300 && res.status < 400 && res.headers.location) {
-      try { res = await request('GET', new URL(res.headers.location, base).toString()); }
+      try { res = await request('GET', new URL(res.headers.location, base).toString(), {}, null, blobOpts); }
       catch (err) { throw storeError(`downloading layer: ${err.message}`, null); }
     }
     if (res.status !== 200) throw storeError(`downloading layer ${layer.digest}: HTTP ${res.status}`, res);
@@ -118,7 +119,7 @@ function createStore({ registry = 'https://ghcr.io', image, token, request = htt
     if (start.status !== 202 || !start.headers.location) throw storeError(`starting upload: HTTP ${start.status}: ${start.text}`, start);
     const location = new URL(start.headers.location, base).toString();
     const sep = location.includes('?') ? '&' : '?';
-    const put = await send('PUT', `${location}${sep}digest=${encodeURIComponent(digest)}`, { 'Content-Type': 'application/octet-stream' }, bytes);
+    const put = await send('PUT', `${location}${sep}digest=${encodeURIComponent(digest)}`, { 'Content-Type': 'application/octet-stream' }, bytes, { timeoutMs: http.BLOB_TIMEOUT_MS });
     if (put.status !== 201) throw storeError(`uploading blob: HTTP ${put.status}: ${put.text}`, put);
     return digest;
   }

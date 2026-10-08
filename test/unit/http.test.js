@@ -78,8 +78,9 @@ test('isThrottled covers 429 and 5xx only', () => {
   assert.equal(h.isThrottled({ status: 409 }), false);
 });
 
-test('redactUrl hides SAS signatures', () => {
-  assert.equal(h.redactUrl('https://x.blob.core/c?sv=1&sig=abc'), 'https://x.blob.core/c?sv=1&sig=REDACTED');
+test('redactUrl drops the query string', () => {
+  assert.equal(h.redactUrl('https://x.blob.core/c/d?sv=1&sig=abc&se=2026'), 'https://x.blob.core/c/d');
+  assert.equal(h.redactUrl('not a url'), 'not a url');
 });
 
 test('parseJson returns {} for bad input', () => {
@@ -98,4 +99,42 @@ test('request times out when the server never answers', async () => {
     for (const s of sockets) s.destroy();
     await new Promise((r) => server.close(r));
   }
+});
+
+async function timeoutOf(options) {
+  const srv = await serve((req, res) => res.end('ok'));
+  const orig = nodeHttp.request;
+  let captured;
+  nodeHttp.request = (...args) => { captured = orig(...args); return captured; };
+  try {
+    assert.equal((await h.request('GET', `${srv.url}/`, {}, null, options)).text, 'ok');
+  } finally {
+    nodeHttp.request = orig;
+    await srv.close();
+  }
+  return captured.timeout;
+}
+
+test('request applies a 60 s timeout by default, an explicit one, or none for 0', async () => {
+  assert.equal(h.DEFAULT_TIMEOUT_MS, 60_000);
+  assert.equal(await timeoutOf(undefined), 60_000);
+  assert.equal(await timeoutOf({}), 60_000);
+  assert.equal(await timeoutOf({ timeoutMs: 1234 }), 1234);
+  assert.equal(await timeoutOf({ timeoutMs: 0 }), undefined);
+});
+
+test('signed blob transfers get the longer blob timeout', async () => {
+  assert.equal(h.BLOB_TIMEOUT_MS, 300_000);
+  const srv = await serve((req, res) => { res.writeHead(req.method === 'PUT' ? 201 : 200); res.end('b'); });
+  const orig = nodeHttp.request;
+  const seen = [];
+  nodeHttp.request = (...args) => { const r = orig(...args); seen.push(r.timeout); return r; };
+  try {
+    await h.blobs.put(`${srv.url}/blob`, Buffer.from('x'));
+    assert.equal((await h.blobs.get(`${srv.url}/blob`)).toString(), 'b');
+  } finally {
+    nodeHttp.request = orig;
+    await srv.close();
+  }
+  assert.deepEqual(seen, [300_000, 300_000]);
 });
