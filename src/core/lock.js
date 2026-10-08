@@ -73,7 +73,12 @@ function createLock({
     for (let i = 1; i <= t.holderPublishAttempts; i += 1) {
       create = await twirp('CreateCacheEntry', { key: k, version: versionFor(k) });
       const url = create.json.signed_upload_url || create.json.signedUploadUrl;
-      if (url) return publish(k, url, record);
+      if (url) {
+        try { return await publish(k, url, record); } catch (err) {
+          log(`could not publish holder record ${k}: ${err.message}`);
+          return '';
+        }
+      }
       if (!http.isThrottled(create)) break;
       await sleep(http.retryAfterMs(create.headers, THROTTLE_FALLBACK_MS) + random() * t.pollJitterMs);
     }
@@ -94,14 +99,19 @@ function createLock({
 
   // Never reclaims a lock whose holder it cannot identify.
   async function reclaimIfAbandoned() {
-    const current = await readCurrent();
-    const who = current && current.holder && current.holder.identity;
-    if (!who || !who.job_id) return false;
-    const job = await rest('GET', `/repos/${repository}/actions/jobs/${who.job_id}`);
-    if (job.status !== 200 || job.json.status !== 'completed') return false;
-    log(`holder "${who.job_name}" (run ${who.run_id}) ended without releasing; reclaiming`);
-    await deleteEntry(current.entryId);
-    return true;
+    try {
+      const current = await readCurrent();
+      const who = current && current.holder && current.holder.identity;
+      if (!who || !who.job_id) return false;
+      const job = await rest('GET', `/repos/${repository}/actions/jobs/${who.job_id}`);
+      if (job.status !== 200 || job.json.status !== 'completed') return false;
+      log(`holder "${who.job_name}" (run ${who.run_id}) ended without releasing; reclaiming`);
+      await deleteEntry(current.entryId);
+      return true;
+    } catch (err) {
+      log(`reclaim check failed: ${err.message}`);
+      return false;
+    }
   }
 
   async function acquire({ info, waitMs, signal }) {
@@ -120,7 +130,12 @@ function createLock({
         const url = res.json.signed_upload_url || res.json.signedUploadUrl;
         if (url) {
           const record = { v: ENVELOPE, identity, lockInfo: info, acquired_at: new Date(now()).toISOString() };
-          const entryId = await publish(key, url, record);
+          let entryId;
+          try { entryId = await publish(key, url, record); } catch (err) {
+            // An unfinalized reservation blocks the key for the cache's reservation timeout.
+            try { await deleteEntry(await publish(key, url, record)); } catch (cleanup) { log(`could not clear lock reservation ${key}: ${cleanup.message}`); }
+            throw err;
+          }
           const holderId = await publishHolder(entryId, record);
           return { ok: true, entryId, holderId };
         }
@@ -142,7 +157,12 @@ function createLock({
         lastReclaim = now();
         if (await reclaimIfAbandoned()) { looksFree = true; continue; }
       }
-      if (now() - start >= waitMs) return { ok: false, current: await readCurrent() };
+      if (now() - start >= waitMs) {
+        try { return { ok: false, current: await readCurrent() }; } catch (err) {
+          log(`could not read the current holder: ${err.message}`);
+          return { ok: false, current: null };
+        }
+      }
       // After a 429, spread waiters across the next window.
       await sleep(throttled
         ? http.retryAfterMs(res.headers, THROTTLE_FALLBACK_MS) + random() * delay

@@ -135,3 +135,34 @@ test('an aborted acquire gives up without taking the lock', async () => {
   const got = await makeLock(fake, c, 2).acquire({ info: { ID: 'b' }, waitMs: 60_000, signal: abort.signal });
   assert.deepEqual(got, { ok: false, aborted: true });
 });
+
+test('a failed holder publish still returns a releasable lock', async () => {
+  const fake = createFakeCache();
+  const lock = makeLock(fake, clock());
+  fake.failPut(1, 1);
+  const got = await lock.acquire({ info: { ID: 'a' }, waitMs: 0 });
+  assert.equal(got.ok, true);
+  assert.equal(got.holderId, '');
+  assert.deepEqual(fake.finalizedKeys(), ['actions-state/root']);
+  await lock.release(got);
+  assert.deepEqual(fake.finalizedKeys(), []);
+  assert.equal(await lock.readCurrent(), null);
+});
+
+test('a failed lock publish throws without leaving the lock held', async () => {
+  const fake = createFakeCache();
+  const lock = makeLock(fake, clock());
+  fake.failPut(1);
+  await assert.rejects(lock.acquire({ info: { ID: 'a' }, waitMs: 0 }), /blob upload failed/);
+  assert.deepEqual(fake.finalizedKeys(), []);
+  assert.equal(await lock.readCurrent(), null);
+});
+
+test('REST failures while waiting end as not acquired, not an exception', async () => {
+  const fake = createFakeCache();
+  const c = clock();
+  await makeLock(fake, c, 1).acquire({ info: { ID: 'a' }, waitMs: 0 });
+  fake.failList(1000, 500);
+  const got = await makeLock(fake, c, 2, { timing: { reclaimIntervalMs: 5000 } }).acquire({ info: { ID: 'b' }, waitMs: 30_000 });
+  assert.deepEqual(got, { ok: false, current: null });
+});

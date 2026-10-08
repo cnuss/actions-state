@@ -8,6 +8,8 @@ function createFakeCache({ repository = 'o/r', ref = 'refs/heads/main' } = {}) {
   const entries = new Map();
   const jobs = new Map();
   const throttle = {};
+  const putFault = { skip: 0, fail: 0 };
+  let listFault = { n: 0, status: 500 };
   const k = (key, version) => `${key}\u0000${version}`;
   const byId = (id) => [...entries.values()].find((e) => String(e.id) === String(id));
   const reply = (status, json, headers = {}) => ({ status, headers, json, text: JSON.stringify(json) });
@@ -40,6 +42,8 @@ function createFakeCache({ repository = 'o/r', ref = 'refs/heads/main' } = {}) {
 
   const blobs = {
     async put(url, bytes) {
+      if (putFault.skip > 0) putFault.skip -= 1;
+      else if (putFault.fail > 0) { putFault.fail -= 1; throw new Error('fake cache: blob upload failed'); }
       const e = byId(url.split('/').pop());
       if (!e) throw new Error('fake cache: upload without a reservation');
       e.bytes = Buffer.from(bytes);
@@ -55,6 +59,7 @@ function createFakeCache({ repository = 'o/r', ref = 'refs/heads/main' } = {}) {
     const params = new URLSearchParams(q);
     let m;
     if (method === 'GET' && p === `/repos/${repository}/actions/caches`) {
+      if (listFault.n > 0) { listFault.n -= 1; return reply(listFault.status, {}); }
       const prefix = params.get('key') || '';
       const wantRef = params.get('ref');
       const list = [...entries.values()]
@@ -82,6 +87,8 @@ function createFakeCache({ repository = 'o/r', ref = 'refs/heads/main' } = {}) {
     blobs,
     setJob(id, status) { jobs.set(id, status); },
     throttleNext(method, n) { throttle[method] = n; },
+    failPut(n, skip = 0) { putFault.fail = n; putFault.skip = skip; },
+    failList(n, status = 500) { listFault = { n, status }; },
     setRef(r) { currentRef = r; },
     finalizedKeys() { return [...entries.values()].filter((e) => e.finalized).map((e) => e.key).sort(); },
   };
