@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { resolveConfig, jobPassword, claimRunfile, waitForServer } = require('../../index');
+const { resolveConfig, jobPassword, claimRunfile, waitForServer, preflightActions, preflightPackages } = require('../../index');
 
 const baseEnv = {
   GITHUB_WORKSPACE: '/w', GITHUB_REPOSITORY: 'CNuss/Thing', GITHUB_REF: 'refs/heads/main', RUNNER_TEMP: '/tmp/rt',
@@ -68,4 +68,43 @@ test('waitForServer times out with the server log', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'actions-state-wait-'));
   fs.writeFileSync(path.join(dir, 'log'), 'boom');
   await assert.rejects(waitForServer(path.join(dir, 'none.json'), path.join(dir, 'log'), 300), /did not start[\s\S]*boom/);
+});
+
+function restAnswering(status) {
+  const calls = [];
+  const rest = async (method, p) => { calls.push(`${method} ${p}`); return { status, headers: {}, json: {}, text: '' }; };
+  return { rest, calls };
+}
+
+test('preflightActions deletes a random missing key and passes on 404, 200 and 204', async () => {
+  for (const status of [404, 200, 204]) {
+    const { rest, calls } = restAnswering(status);
+    const warnings = [];
+    await preflightActions(rest, 'o/r', (m) => warnings.push(m));
+    assert.equal(calls.length, 1);
+    assert.match(calls[0], /^DELETE \/repos\/o\/r\/actions\/caches\?key=actions-state-preflight-[0-9a-f]{16}$/);
+    assert.deepEqual(warnings, []);
+  }
+});
+
+test('preflightActions fails on 403 with the permission to add', async () => {
+  await assert.rejects(preflightActions(restAnswering(403).rest, 'o/r', () => {}), /needs "permissions: actions: write" for state locks/);
+});
+
+test('preflightActions warns and continues on other statuses and network errors', async () => {
+  const warnings = [];
+  await preflightActions(restAnswering(500).rest, 'o/r', (m) => warnings.push(m));
+  await preflightActions(async () => { throw new Error('ECONNRESET'); }, 'o/r', (m) => warnings.push(m));
+  assert.equal(warnings.length, 2);
+  assert.match(warnings[0], /HTTP 500/);
+  assert.match(warnings[1], /ECONNRESET/);
+});
+
+test('preflightPackages passes, fails on a refused push, and warns on anything else', async () => {
+  const warnings = [];
+  await preflightPackages({ canPush: async () => true }, (m) => warnings.push(m));
+  await assert.rejects(preflightPackages({ canPush: async () => false }, () => {}), /needs "permissions: packages: write" to save state/);
+  await preflightPackages({ canPush: async () => { throw new Error('HTTP 502'); } }, (m) => warnings.push(m));
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /HTTP 502/);
 });

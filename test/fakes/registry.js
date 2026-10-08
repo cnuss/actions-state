@@ -24,6 +24,7 @@ async function startFakeRegistry() {
 
       if (url.pathname === '/token') {
         if (!(req.headers.authorization || '').startsWith('Basic ')) return send(401);
+        if (fake.denyToken) return send(403, JSON.stringify({ errors: [{ code: 'DENIED' }] }));
         scopes.push(url.searchParams.get('scope'));
         return send(200, JSON.stringify({ token: 'bearer-1' }), { 'Content-Type': 'application/json' });
       }
@@ -33,10 +34,12 @@ async function startFakeRegistry() {
       let m;
       if ((m = url.pathname.match(/^\/v2\/(.+)\/blobs\/uploads\/(.*)$/))) {
         if (req.method === 'POST') {
+          if (fake.denyPush) return send(403, JSON.stringify({ errors: [{ code: 'DENIED' }] }));
           const id = crypto.randomUUID();
           uploads.set(id, m[1]);
           return send(202, '', { Location: `/v2/${m[1]}/blobs/uploads/${id}?state=x` });
         }
+        if (req.method === 'DELETE') return send(uploads.delete(m[2]) ? 204 : 404);
         if (req.method === 'PUT') {
           const digest = url.searchParams.get('digest');
           if (!uploads.has(m[2]) || sha(body) !== digest) return send(400, 'DIGEST_INVALID');
@@ -69,11 +72,15 @@ async function startFakeRegistry() {
     });
   });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
-  return {
+  // denyToken refuses the token exchange; denyPush refuses upload starts.
+  const fake = {
     url: `http://127.0.0.1:${server.address().port}`,
-    blobs, manifests, requests, scopes,
+    blobs, manifests, uploads, requests, scopes,
+    denyToken: false,
+    denyPush: false,
     close: () => new Promise((r) => server.close(r)),
   };
+  return fake;
 }
 
 module.exports = { startFakeRegistry };

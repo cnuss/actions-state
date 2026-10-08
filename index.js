@@ -12,14 +12,17 @@ const { spawn } = require('child_process');
 const { deriveName, tagSlug, imageName } = require('./src/core/names');
 const { aadFor } = require('./src/core/crypto');
 const { request, restClient } = require('./src/core/http');
+const { createStore } = require('./src/core/store');
 const { repoInfo, packageVisibility, findSelfJob } = require('./src/core/github');
 const { getAdapter } = require('./src/adapters');
 
+const REGISTRY = 'https://ghcr.io';
 const START_TIMEOUT_MS = 10_000;
 // Longer than the server's 10 s wait for requests still in flight.
 const SHUTDOWN_TIMEOUT_MS = 30_000;
 
 function log(msg) { process.stdout.write(`${msg}\n`); }
+const warn = (msg) => log(`::warning::${msg}`);
 
 function appendCommandFile(file, name, value) {
   if (!file) return;
@@ -90,6 +93,32 @@ async function waitForServer(runfile, logFile, timeoutMs = START_TIMEOUT_MS) {
   throw new Error(`state server did not start within ${timeoutMs / 1000}s:\n${serverLog}`);
 }
 
+// Deleting a key that cannot exist needs actions: write and changes nothing.
+async function preflightActions(rest, repository, onWarning = warn) {
+  const key = `actions-state-preflight-${crypto.randomBytes(8).toString('hex')}`;
+  let r;
+  try {
+    r = await rest('DELETE', `/repos/${repository}/actions/caches?key=${encodeURIComponent(key)}`);
+  } catch (err) {
+    onWarning(`could not check for the actions: write permission: ${err.message}`);
+    return;
+  }
+  if (r.status === 404 || r.status === 200 || r.status === 204) return;
+  if (r.status === 403) throw new Error('the job needs "permissions: actions: write" for state locks');
+  onWarning(`could not check for the actions: write permission: HTTP ${r.status}`);
+}
+
+async function preflightPackages(store, onWarning = warn) {
+  let ok;
+  try {
+    ok = await store.canPush();
+  } catch (err) {
+    onWarning(`could not check for the packages: write permission: ${err.message}`);
+    return;
+  }
+  if (!ok) throw new Error('the job needs "permissions: packages: write" to save state');
+}
+
 function basicAuth(password) {
   return { Authorization: `Basic ${Buffer.from(`actions-state:${password}`).toString('base64')}` };
 }
@@ -115,6 +144,8 @@ async function main() {
     if (visibility === 'public') throw new Error(`ghcr.io/${cfg.image} is public: set the passphrase input from a secret to encrypt state`);
   }
   const job = await findSelfJob(rest, env);
+  await preflightActions(rest, cfg.repository);
+  await preflightPackages(createStore({ registry: REGISTRY, image: cfg.image, token: cfg.token }));
 
   fs.mkdirSync(cfg.runDir, { recursive: true });
   const runfile = claimRunfile(cfg.runDir, cfg.slug, cfg.name);
@@ -126,7 +157,7 @@ async function main() {
   log(`::add-mask::${password}`);
 
   const config = {
-    runfile, apiUrl: cfg.apiUrl, registry: 'https://ghcr.io', repository: cfg.repository, ref: cfg.ref,
+    runfile, apiUrl: cfg.apiUrl, registry: REGISTRY, repository: cfg.repository, ref: cfg.ref,
     slug: cfg.slug, name: cfg.name, image: cfg.image, adapter: adapter.name,
     identity: { run_id: env.GITHUB_RUN_ID, run_attempt: env.GITHUB_RUN_ATTEMPT, job_id: job.id, job_name: job.name, job_url: job.url, ref: cfg.ref },
     isDefaultRef, allowAnyRef: cfg.allowAnyRef, lockTimeoutMs: cfg.lockTimeoutMs, aad: aadFor(cfg.repository, cfg.name),
@@ -193,7 +224,7 @@ async function post() {
   }
 }
 
-module.exports = { resolveConfig, jobPassword, claimRunfile, waitForServer };
+module.exports = { resolveConfig, jobPassword, claimRunfile, waitForServer, preflightActions, preflightPackages };
 
 if (require.main === module) {
   const run = process.env.STATE_post === 'true' ? post : main;

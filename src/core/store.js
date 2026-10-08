@@ -55,6 +55,7 @@ function buildManifest({ layerDigest, layerSize, mediaType, annotations }) {
 // Network failures, 429 and 5xx are worth retrying; other statuses are not.
 function storeError(message, res) {
   const err = new Error(message);
+  err.status = res ? res.status : null;
   err.retryable = !res || res.status === 429 || res.status >= 500;
   return err;
 }
@@ -136,6 +137,24 @@ function createStore({ registry = 'https://ghcr.io', image, token, request = htt
     return digestOf(manifest);
   }
 
+  // Whether the token may push: starts a blob upload and cancels it. True on
+  // 202, false on 401/403 (including a refused token exchange); throws otherwise.
+  async function canPush() {
+    let start;
+    try {
+      start = await send('POST', `/v2/${image}/blobs/uploads/`);
+    } catch (err) {
+      if (err.status === 401 || err.status === 403) return false;
+      throw err;
+    }
+    if (start.status === 401 || start.status === 403) return false;
+    if (start.status !== 202) throw storeError(`starting a test upload: HTTP ${start.status}: ${start.text}`, start);
+    if (start.headers.location) {
+      try { await send('DELETE', new URL(start.headers.location, base).toString()); } catch { /* the registry expires abandoned uploads */ }
+    }
+    return true;
+  }
+
   async function listTags() {
     const res = await send('GET', `/v2/${image}/tags/list?n=1000`);
     if (res.status === 404) return [];
@@ -143,7 +162,7 @@ function createStore({ registry = 'https://ghcr.io', image, token, request = htt
     return http.parseJson(res.text).tags || [];
   }
 
-  return { image, resolve, pull, push, listTags };
+  return { image, resolve, pull, push, listTags, canPush };
 }
 
 module.exports = {

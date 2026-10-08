@@ -80,3 +80,31 @@ test('blob uploads and downloads use the blob timeout', async (t) => {
   assert.equal(blobCalls.length, 4);
   for (const c of blobCalls) assert.equal(c.timeoutMs, 300_000, `${c.method} ${c.path}`);
 });
+
+test('canPush starts an upload and cancels it', async (t) => {
+  const reg = await startFakeRegistry();
+  t.after(() => reg.close());
+  const store = createStore({ registry: reg.url, image: 'o/r/actions-state', token: 'gh' });
+  assert.equal(await store.canPush(), true);
+  assert.equal(reg.requests.filter((r) => r.startsWith('POST /v2/o/r/actions-state/blobs/uploads/')).length, 1);
+  assert.equal(reg.requests.filter((r) => r.startsWith('DELETE /v2/o/r/actions-state/blobs/uploads/')).length, 1);
+  assert.equal(reg.uploads.size, 0);
+});
+
+test('canPush is false when the upload or the push-scope token is refused', async (t) => {
+  const reg = await startFakeRegistry();
+  t.after(() => reg.close());
+  reg.denyPush = true;
+  assert.equal(await createStore({ registry: reg.url, image: 'o/r/actions-state', token: 'gh' }).canPush(), false);
+  reg.denyPush = false;
+  reg.denyToken = true;
+  assert.equal(await createStore({ registry: reg.url, image: 'o/r/actions-state', token: 'gh' }).canPush(), false);
+});
+
+test('canPush throws on statuses that say nothing about permissions', async () => {
+  const request = async (method, url) => (new URL(url).pathname === '/token'
+    ? { status: 200, headers: {}, text: '{"token":"t"}', buffer: Buffer.alloc(0) }
+    : { status: 500, headers: {}, text: 'busy', buffer: Buffer.alloc(0) });
+  const store = createStore({ registry: 'http://r', image: 'o/r/actions-state', token: 'gh', request });
+  await assert.rejects(store.canPush(), /test upload: HTTP 500/);
+});
