@@ -41,6 +41,8 @@ outputs:
     description: 'The state package, ghcr.io/<owner>/<repo>/actions-state.'
   address:
     description: 'The local state URL Terraform uses.'
+  outputs:
+    description: 'Non-sensitive root module outputs of the state as loaded, as a JSON object.'
 
 runs:
   using: 'node24'

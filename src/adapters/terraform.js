@@ -153,7 +153,17 @@ function stateMeta(bytes) {
   };
 }
 
+// Root module outputs: { name: { value, sensitive } }.
+function stateOutputs(bytes) {
+  const doc = JSON.parse(bytes.toString('utf8'));
+  const result = {};
+  for (const [name, o] of Object.entries(doc.outputs || {})) {
+    result[name] = { value: o.value, sensitive: o.sensitive === true };
+  }
+  return result;
+}
+
 module.exports = {
   name: 'terraform', OVERRIDE_FILE, LAYER_MEDIA_TYPE,
-  stripComments, findBackends, check, overrideHcl, wire, unwire, stateMeta,
+  stripComments, findBackends, check, overrideHcl, wire, unwire, stateMeta, stateOutputs,
 };

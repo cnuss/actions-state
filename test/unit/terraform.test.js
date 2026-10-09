@@ -116,3 +116,16 @@ test('detects unquoted backend labels and a cloud block right after a brace', ()
     { file: 'a.tf', type: 's3' }, { file: 'b.tf', type: 'cloud' }, { file: 'c.tf', type: 'gcs' },
   ]);
 });
+
+test('stateOutputs reads root outputs and their sensitivity', () => {
+  const state = { version: 4, outputs: { url: { value: 'https://x', type: 'string' }, pw: { value: 's3', type: 'string', sensitive: true } } };
+  assert.deepEqual(tf.stateOutputs(Buffer.from(JSON.stringify(state))), {
+    url: { value: 'https://x', sensitive: false },
+    pw: { value: 's3', sensitive: true },
+  });
+});
+
+test('stateOutputs is empty without outputs', () => {
+  assert.deepEqual(tf.stateOutputs(Buffer.from('{"version":4}')), {});
+  assert.deepEqual(tf.stateOutputs(Buffer.from('{"version":4,"outputs":null}')), {});
+});

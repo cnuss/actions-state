@@ -5,7 +5,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { resolveConfig, jobPassword, claimRunfile, waitForServer, preflightActions, preflightPackages, needsWritePreflight, post } = require('../../index');
+const http = require('node:http');
+const { resolveConfig, jobPassword, claimRunfile, waitForServer, preflightActions, preflightPackages, needsWritePreflight, post, runOutputs } = require('../../index');
 
 const baseEnv = {
   GITHUB_WORKSPACE: '/w', GITHUB_REPOSITORY: 'CNuss/Thing', GITHUB_REF: 'refs/heads/main', RUNNER_TEMP: '/tmp/rt',
@@ -139,4 +140,75 @@ test('write-permission preflights run only where the job may save', () => {
   assert.equal(needsWritePreflight({ isDefaultRef: true, allowAnyRef: false }), true);
   assert.equal(needsWritePreflight({ isDefaultRef: false, allowAnyRef: true }), true);
   assert.equal(needsWritePreflight({ isDefaultRef: false, allowAnyRef: false }), false);
+});
+
+function readCommandFile(file) {
+  const result = {};
+  const re = /^(.+?)<<(ghadelimiter_[0-9a-f]+)\n([\s\S]*?)\n\2$/gm;
+  for (const m of fs.readFileSync(file, 'utf8').matchAll(re)) result[m[1]] = m[3];
+  return result;
+}
+
+async function stateServer(state, password) {
+  const server = http.createServer((req, res) => {
+    const auth = `Basic ${Buffer.from(`actions-state:${password}`).toString('base64')}`;
+    if (req.headers.authorization !== auth) { res.statusCode = 401; return res.end(); }
+    if (req.method !== 'GET' || req.url !== '/state') { res.statusCode = 404; return res.end(); }
+    if (!state) { res.statusCode = 404; return res.end('no state yet'); }
+    res.end(JSON.stringify(state));
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  return server;
+}
+
+function outputsEnv(dir, extra = {}) {
+  const output = path.join(dir, 'output');
+  fs.writeFileSync(output, '');
+  return { ...baseEnv, RUNNER_TEMP: dir, GITHUB_OUTPUT: output, 'INPUT_WORKING-DIRECTORY': 'infra', ...extra };
+}
+
+test('runOutputs sets step outputs from the served state', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'as-out-'));
+  const state = { version: 4, outputs: { url: { value: 'https://x' }, tags: { value: { a: { b: { c: [1, 'two'] } } } }, pw: { value: 's3cr3t', sensitive: true } } };
+  const server = await stateServer(state, 'pw1');
+  try {
+    fs.mkdirSync(path.join(dir, 'actions-state'));
+    fs.writeFileSync(path.join(dir, 'actions-state', 'password'), 'pw1');
+    fs.writeFileSync(path.join(dir, 'actions-state', 'infra.json'), JSON.stringify({ port: server.address().port }));
+    const env = outputsEnv(dir);
+    const printed = [];
+    await runOutputs({ env, print: (m) => printed.push(m) });
+    assert.deepEqual(readCommandFile(env.GITHUB_OUTPUT), {
+      url: 'https://x', tags: '{"a":{"b":{"c":[1,"two"]}}}', json: '{"url":"https://x","tags":{"a":{"b":{"c":[1,"two"]}}}}', sensitive: '["pw"]',
+    });
+    assert.ok(!printed.join('\n').includes('s3cr3t'));
+
+    const env2 = outputsEnv(dir, { 'INPUT_INCLUDE-SENSITIVE': 'true' });
+    const printed2 = [];
+    await runOutputs({ env: env2, print: (m) => printed2.push(m) });
+    assert.equal(readCommandFile(env2.GITHUB_OUTPUT).pw, 's3cr3t');
+    assert.ok(printed2.includes('::add-mask::s3cr3t'));
+  } finally {
+    server.close();
+  }
+});
+
+test('runOutputs with no state yet sets empty outputs', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'as-out-'));
+  const server = await stateServer(null, 'pw1');
+  try {
+    fs.mkdirSync(path.join(dir, 'actions-state'));
+    fs.writeFileSync(path.join(dir, 'actions-state', 'password'), 'pw1');
+    fs.writeFileSync(path.join(dir, 'actions-state', 'infra.json'), JSON.stringify({ port: server.address().port }));
+    const env = outputsEnv(dir);
+    await runOutputs({ env, print: () => {} });
+    assert.deepEqual(readCommandFile(env.GITHUB_OUTPUT), { json: '{}', sensitive: '[]' });
+  } finally {
+    server.close();
+  }
+});
+
+test('runOutputs fails when the state is not served in this job', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'as-out-'));
+  await assert.rejects(runOutputs({ env: outputsEnv(dir), print: () => {} }), /state "infra" is not served in this job/);
 });

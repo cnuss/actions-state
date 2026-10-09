@@ -15,6 +15,7 @@ const { request, restClient } = require('./src/core/http');
 const { createStore } = require('./src/core/store');
 const { repoInfo, packageVisibility, findSelfJob } = require('./src/core/github');
 const { getAdapter } = require('./src/adapters');
+const { toStepOutputs } = require('./src/outputs');
 
 const REGISTRY = 'https://ghcr.io';
 const START_TIMEOUT_MS = 10_000;
@@ -128,6 +129,34 @@ function basicAuth(password) {
   return { Authorization: `Basic ${Buffer.from(`actions-state:${password}`).toString('base64')}` };
 }
 
+async function fetchOutputs(endpoint, password) {
+  const r = await request('GET', `${endpoint}/state`, basicAuth(password), null, { timeoutMs: 60_000 });
+  if (r.status === 404) return {};
+  if (r.status !== 200) throw new Error(`reading state failed: HTTP ${r.status} ${r.text}`);
+  return getAdapter('terraform').stateOutputs(r.buffer);
+}
+
+// The outputs sub-action: step outputs from the newest state the server in
+// this job holds.
+async function runOutputs({ env = process.env, print = log } = {}) {
+  const cfg = resolveConfig(env);
+  let run = {};
+  try { run = JSON.parse(fs.readFileSync(path.join(cfg.runDir, `${cfg.slug}.json`), 'utf8')); } catch { /* not served */ }
+  let password = '';
+  try { password = fs.readFileSync(path.join(cfg.runDir, 'password'), 'utf8'); } catch { /* not served */ }
+  if (!run.port || !password) {
+    throw new Error(`state "${cfg.name}" is not served in this job: use cnuss/actions-state with the same working-directory or name earlier in the job`);
+  }
+  const outputs = await fetchOutputs(`http://127.0.0.1:${run.port}`, password);
+  const result = toStepOutputs(outputs, { includeSensitive: input(env, 'include-sensitive') === 'true' });
+  for (const value of result.masks) print(`::add-mask::${value}`);
+  for (const w of result.warnings) print(`::warning::[actions-state] ${w}`);
+  for (const [name, value] of result.entries) appendCommandFile(env.GITHUB_OUTPUT, name, value);
+  appendCommandFile(env.GITHUB_OUTPUT, 'json', result.json);
+  appendCommandFile(env.GITHUB_OUTPUT, 'sensitive', JSON.stringify(result.sensitive));
+  print(`[actions-state] set ${result.entries.length} outputs from "${cfg.name}"${result.sensitive.length ? `; sensitive: ${result.sensitive.join(', ')}` : ''}`);
+}
+
 async function main() {
   saveState('post', 'true');
   const env = process.env;
@@ -189,6 +218,7 @@ async function main() {
   setOutput('state-name', cfg.name);
   setOutput('image', `ghcr.io/${cfg.image}`);
   setOutput('address', `${endpoint}/state`);
+  setOutput('outputs', toStepOutputs(await fetchOutputs(endpoint, password)).json);
   const mode = isDefaultRef ? 'read/write' : cfg.allowAnyRef ? 'read/write (allow-apply-from-any-ref)' : 'plan only';
   log(`[actions-state] serving "${cfg.name}" from ghcr.io/${cfg.image}:${cfg.slug} (${mode}) at ${endpoint}`);
 }
@@ -242,7 +272,7 @@ async function post({ env = process.env, print = log } = {}) {
   });
 }
 
-module.exports = { resolveConfig, jobPassword, claimRunfile, waitForServer, preflightActions, preflightPackages, needsWritePreflight, post };
+module.exports = { resolveConfig, jobPassword, claimRunfile, waitForServer, preflightActions, preflightPackages, needsWritePreflight, post, runOutputs };
 
 if (require.main === module) {
   const run = process.env.STATE_post === 'true' ? post : main;

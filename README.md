@@ -91,6 +91,7 @@ the package.
 | `state-name` | The resolved state name. |
 | `image` | The state package. |
 | `address` | The local state URL. |
+| `outputs` | Non-sensitive root module outputs of the state as loaded, as a JSON object (`{}` before the first apply). |
 
 ## Several root modules
 
@@ -106,6 +107,79 @@ Use the action once per directory; each gets its own state:
           working-directory: infra/zone
           passphrase: ${{ secrets.STATE_PASSPHRASE }}
 ```
+
+## Secrets as variables
+
+Pass a repository secret to a Terraform variable through a `TF_VAR_<name>`
+environment variable on each step that runs `plan` or `apply`:
+
+```hcl
+variable "db_password" {
+  type      = string
+  sensitive = true
+}
+```
+
+```yaml
+      - uses: cnuss/actions-state@v1
+        with:
+          passphrase: ${{ secrets.STATE_PASSPHRASE }}
+      - run: terraform init
+      - run: terraform apply -auto-approve
+        env:
+          TF_VAR_db_password: ${{ secrets.DB_PASSWORD }}
+```
+
+GitHub masks the secret in logs, and `sensitive = true` keeps it out of plan
+output. A value that reaches a resource or output is still written to state,
+so set `passphrase` to encrypt it, even in a private repository.
+
+## Terraform outputs
+
+`cnuss/actions-state/outputs` turns the root module outputs of the newest
+state into step outputs. Use it after `apply`, with the same
+`working-directory` or `name`:
+
+```yaml
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    outputs:
+      environments: ${{ steps.tf.outputs.environments }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: cnuss/actions-state@v1
+        with:
+          passphrase: ${{ secrets.STATE_PASSPHRASE }}
+      - run: terraform init
+      - run: terraform apply -auto-approve
+      - id: tf
+        uses: cnuss/actions-state/outputs@v1
+      - run: echo "$URL"
+        env:
+          URL: ${{ steps.tf.outputs.url }}
+
+  deploy:
+    needs: apply
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "$REGION"
+        env:
+          REGION: ${{ fromJSON(needs.apply.outputs.environments).prod.region }}
+```
+
+- Each output becomes a step output of the same name. Strings are passed as
+  they are; numbers, booleans, lists, maps and nested combinations are JSON,
+  so read into them with `fromJSON(...)`.
+- `json` holds every included output as one JSON object, so
+  `fromJSON(steps.tf.outputs.json).<name>` works for strings too.
+- Sensitive outputs are left out and their names listed in `sensitive` (a JSON
+  array). `include-sensitive: true` sets them too, masked in logs, but GitHub
+  drops job outputs that contain masked values, so they only reach later steps
+  of the same job.
+- An output named `json` or `sensitive` is only in `json`.
+- A job that only reads state does not need Terraform: the main action's
+  `outputs` output has the outputs of the state it loaded.
 
 ## Moving existing state
 
