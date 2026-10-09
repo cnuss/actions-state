@@ -3,7 +3,8 @@
 // Step outputs from tool outputs. Sensitive values stay out unless asked for,
 // because GitHub drops job outputs that contain masked values.
 
-const RESERVED = new Set(['json', 'sensitive']);
+// The action's own outputs.
+const RESERVED = new Set(['json', 'sensitive', 'state-name', 'image', 'address']);
 
 function toStepOutputs(outputs, { includeSensitive = false } = {}) {
   const entries = [];
