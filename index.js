@@ -53,6 +53,7 @@ function resolveConfig(env) {
     lockTimeoutMs: Number(lockTimeout) * 1000,
     replaceBackend: input(env, 'replace-backend') === 'true',
     allowAnyRef: input(env, 'allow-apply-from-any-ref') === 'true',
+    includeSensitive: input(env, 'include-sensitive') !== 'false',
     token: input(env, 'github-token'),
     runDir: path.join(env.RUNNER_TEMP || os.tmpdir(), 'actions-state'),
     apiUrl: env.GITHUB_API_URL || 'https://api.github.com',
@@ -157,7 +158,7 @@ async function fetchOutputs(endpoint, password) {
 }
 
 // One step output per root output, plus json and sensitive.
-function emitOutputs(outputs, { env = process.env, print = log, includeSensitive = false } = {}) {
+function emitOutputs(outputs, { env = process.env, print = log, includeSensitive = true } = {}) {
   const result = toStepOutputs(outputs, { includeSensitive });
   for (const value of result.masks) print(`::add-mask::${value}`);
   for (const w of result.warnings) print(`::warning::[actions-state] ${w}`);
@@ -236,7 +237,7 @@ async function main() {
     const code = await runScript(script, { cwd: cfg.workingDirectory, env: scriptEnv(env, password), scriptDir: cfg.runDir });
     if (code !== 0) throw new Error(`the run script exited with code ${code}`);
   }
-  const { entries, sensitive } = emitOutputs(await fetchOutputs(endpoint, password), { includeSensitive: input(env, 'include-sensitive') === 'true' });
+  const { entries, sensitive } = emitOutputs(await fetchOutputs(endpoint, password), { includeSensitive: cfg.includeSensitive });
   log(`[actions-state] set ${entries.length} outputs${sensitive.length ? `; sensitive: ${sensitive.join(', ')}` : ''}`);
 }
 

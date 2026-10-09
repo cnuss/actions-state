@@ -38,6 +38,12 @@ test('resolveConfig: booleans and lock-timeout 0', () => {
   assert.equal(cfg.allowAnyRef, true);
 });
 
+test('resolveConfig: include-sensitive is on unless it is false', () => {
+  assert.equal(resolveConfig(baseEnv).includeSensitive, true);
+  assert.equal(resolveConfig({ ...baseEnv, 'INPUT_INCLUDE-SENSITIVE': 'true' }).includeSensitive, true);
+  assert.equal(resolveConfig({ ...baseEnv, 'INPUT_INCLUDE-SENSITIVE': 'false' }).includeSensitive, false);
+});
+
 test('resolveConfig refuses a non-numeric lock-timeout', () => {
   assert.throws(() => resolveConfig({ ...baseEnv, 'INPUT_LOCK-TIMEOUT': '10m' }), /whole number of seconds/);
 });
@@ -184,19 +190,19 @@ test('fetchOutputs reads the served state, and {} before the first save', async 
   }
 });
 
-test('emitOutputs sets one step output per output plus json and sensitive', () => {
+test('emitOutputs with includeSensitive false leaves sensitive outputs out', () => {
   const file = outputFile();
   const printed = [];
   emitOutputs({ url: { value: 'https://x', sensitive: false }, tags: { value: { a: { b: [1] } }, sensitive: false }, pw: { value: 's3cr3t', sensitive: true } },
-    { env: { GITHUB_OUTPUT: file }, print: (m) => printed.push(m) });
+    { env: { GITHUB_OUTPUT: file }, print: (m) => printed.push(m), includeSensitive: false });
   assert.deepEqual(readCommandFile(file), { url: 'https://x', tags: '{"a":{"b":[1]}}', json: '{"url":"https://x","tags":{"a":{"b":[1]}}}', sensitive: '["pw"]' });
   assert.ok(!printed.join('\n').includes('s3cr3t'));
 });
 
-test('emitOutputs with includeSensitive sets and masks sensitive outputs', () => {
+test('emitOutputs sets sensitive outputs by default, as-is and masked', () => {
   const file = outputFile();
   const printed = [];
-  emitOutputs({ pw: { value: 's3cr3t', sensitive: true } }, { env: { GITHUB_OUTPUT: file }, print: (m) => printed.push(m), includeSensitive: true });
+  emitOutputs({ pw: { value: 's3cr3t', sensitive: true } }, { env: { GITHUB_OUTPUT: file }, print: (m) => printed.push(m) });
   assert.deepEqual(readCommandFile(file), { pw: 's3cr3t', json: '{"pw":"s3cr3t"}', sensitive: '["pw"]' });
   assert.equal(printed[0], '::add-mask::s3cr3t');
 });
