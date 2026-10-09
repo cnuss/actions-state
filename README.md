@@ -107,6 +107,32 @@ Use the action once per directory; each gets its own state:
           passphrase: ${{ secrets.STATE_PASSPHRASE }}
 ```
 
+## Secrets as variables
+
+Pass a repository secret to a Terraform variable through a `TF_VAR_<name>`
+environment variable on each step that runs `plan` or `apply`:
+
+```hcl
+variable "db_password" {
+  type      = string
+  sensitive = true
+}
+```
+
+```yaml
+      - uses: cnuss/actions-state@v1
+        with:
+          passphrase: ${{ secrets.STATE_PASSPHRASE }}
+      - run: terraform init
+      - run: terraform apply -auto-approve
+        env:
+          TF_VAR_db_password: ${{ secrets.DB_PASSWORD }}
+```
+
+GitHub masks the secret in logs, and `sensitive = true` keeps it out of plan
+output. A value that reaches a resource or output is still written to state,
+so set `passphrase` to encrypt it, even in a private repository.
+
 ## Moving existing state
 
 Run once with `replace-backend: true` and `terraform init -migrate-state
