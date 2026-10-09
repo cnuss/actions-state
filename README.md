@@ -60,7 +60,7 @@ listed in `.git/info/exclude`.
 | `lock-timeout` | `600` | Seconds to wait for a lock held by another job. `0` fails at once. |
 | `replace-backend` | `false` | Proceed even if the configuration declares a backend. |
 | `allow-apply-from-any-ref` | `false` | Let refs other than the default branch apply. |
-| `include-sensitive` | `false` | Also set sensitive Terraform outputs as step outputs. See [Terraform outputs](#terraform-outputs). |
+| `include-sensitive` | `true` | Set sensitive Terraform outputs as step outputs too; `false` leaves them out. See [Terraform outputs](#terraform-outputs). |
 | `run` | | Commands to run in `working-directory` once the backend is up. See [Running Terraform in the step](#running-terraform-in-the-step). |
 | `github-token` | `${{ github.token }}` | Needs `actions: write` and `packages: write`. |
 
@@ -206,10 +206,10 @@ jobs:
   combinations are JSON, so read into them with `fromJSON(...)`.
 - `json` holds every included output as one JSON object, so
   `fromJSON(steps.tf.outputs.json).<name>` works for strings too.
-- Sensitive outputs are left out and their names listed in `sensitive` (a JSON
-  array). `include-sensitive: true` sets them too, masked in logs, but GitHub
-  drops job outputs that contain masked values, so they only reach later steps
-  of the same job.
+- Sensitive outputs are set too, masked in logs, and their names are listed
+  in `sensitive` (a JSON array). GitHub drops job outputs that contain masked
+  values, so they only reach later steps of the same job.
+  `include-sensitive: false` leaves them out of the step outputs and `json`.
 - An output named `json`, `sensitive`, `state-name`, `image` or `address` is
   only in `json`.
 - A job that only reads state needs no Terraform: without `run`, the outputs

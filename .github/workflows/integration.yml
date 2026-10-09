@@ -81,6 +81,7 @@ jobs:
           name: ${{ env.PREFIX }}-smoke-${{ matrix.tool }}
           passphrase: ${{ env.PASSPHRASE }}
           allow-apply-from-any-ref: true
+          include-sensitive: false
           run: |
             if [ -z "$TF_VAR_secret" ]; then
               echo "::error::the SMOKE_SECRET repository secret is not available to this run"
@@ -140,8 +141,7 @@ jobs:
           name: ${{ env.PREFIX }}-smoke-${{ matrix.tool }}
           passphrase: ${{ env.PASSPHRASE }}
           allow-apply-from-any-ref: true
-          include-sensitive: true
-      - name: A new job reads the outputs of the loaded state, sensitive ones included, and the job outputs
+      - name: A new job reads the outputs of the loaded state, sensitive ones included by default, and the job outputs
         env:
           SECRET: ${{ secrets.SMOKE_SECRET }}
           JSON: ${{ steps.state.outputs.json }}
