@@ -310,7 +310,7 @@ needed.
 | contention | Three concurrent applies on `main` serialize; the final serial is the initial one plus three. |
 | fail-fast | With `lock-timeout: 0` a second job gets the 423 holder message immediately. |
 | refs | On a branch, `plan` succeeds and `apply` is refused. |
-| crash | The runner is killed mid-apply; the next job reclaims the lock. |
+| crash | The server is killed mid-apply and its job ends without releasing; the next job reclaims the lock. |
 | encryption | The GHCR layer starts with `ASTE1`; a wrong passphrase fails the main step. |
 | public guard | Without a passphrase, the main step fails. |
 | backend conflict | An `s3` fixture fails; `replace-backend: true` proceeds. |

@@ -293,8 +293,6 @@ jobs:
   crash-holder:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # Killing the runner fails this job on purpose; the waiter is the test.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - run: test/scripts/install-tool.sh terraform
@@ -304,14 +302,19 @@ jobs:
           name: ${{ env.PREFIX }}-crash
           passphrase: ${{ env.PASSPHRASE }}
           allow-apply-from-any-ref: true
-      - name: Create state, take the lock, then kill the runner
+      # Deleting the runfile leaves the post step nothing to release, so the
+      # job ends holding the lock.
+      - name: Create state, take the lock, then crash the server
         working-directory: ${{ env.FIXTURE }}
         run: |
           terraform init -input=false
           terraform apply -auto-approve -input=false -var value=a
           terraform apply -auto-approve -input=false -var value=b -var sleep=600 &
           sleep 30
-          sudo pkill -9 -f Runner.Worker
+          runfile=$(ls "$RUNNER_TEMP"/actions-state/*.json)
+          kill -9 "$(jq -r .pid "$runfile")"
+          pkill -9 -f 'terraform apply' || true
+          rm -f "$runfile"
 
   crash-waiter:
     runs-on: ubuntu-latest
