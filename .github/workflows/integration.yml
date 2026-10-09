@@ -25,7 +25,7 @@ env:
   TERRAFORM_VERSION: 1.16.5
   TOFU_VERSION: 1.13.1
   PREFIX: it-${{ github.run_id }}-${{ github.run_attempt }}
-  # Test-only value: these states hold nothing but terraform_data.
+  # Test-only value: these states hold nothing but terraform_data and null_resource.
   PASSPHRASE: integration-test-passphrase
   FIXTURE: test/fixtures/data
   GH_TOKEN: ${{ github.token }}
@@ -53,6 +53,36 @@ jobs:
           ${{ matrix.tool }} init -input=false
           ${{ matrix.tool }} apply -auto-approve -input=false -var value=one
       - run: node test/scripts/inspect.js "$PREFIX-lifecycle-${{ matrix.tool }}" --expect-encrypted --min-serial 1
+
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        tool: [terraform, tofu]
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - run: test/scripts/install-tool.sh ${{ matrix.tool }}
+      - uses: ./
+        with:
+          working-directory: test/fixtures/null
+          name: ${{ env.PREFIX }}-smoke-${{ matrix.tool }}
+          passphrase: ${{ env.PASSPHRASE }}
+          allow-apply-from-any-ref: true
+      - name: A provider-backed resource survives apply, reload and destroy
+        working-directory: test/fixtures/null
+        run: |
+          ${{ matrix.tool }} init -input=false
+          ${{ matrix.tool }} apply -auto-approve -input=false
+          ${{ matrix.tool }} state list | grep -qx null_resource.smoke
+          ${{ matrix.tool }} plan -detailed-exitcode -input=false
+          ${{ matrix.tool }} destroy -auto-approve -input=false
+          if [ -n "$(${{ matrix.tool }} state list)" ]; then
+            echo "::error::state still lists resources after destroy"
+            exit 1
+          fi
+      - run: node test/scripts/inspect.js "$PREFIX-smoke-${{ matrix.tool }}" --expect-encrypted --min-serial 2
 
   lifecycle-reload:
     needs: lifecycle
@@ -371,7 +401,7 @@ jobs:
           grep -q 'may only plan' "$RUNNER_TEMP/apply.log"
 
   cleanup:
-    needs: [lifecycle-reload, wrong-passphrase, public-guard, backend-conflict, contention-verify, fail-fast, fail-fast-holder, crash-holder, crash-waiter, stale-save, refs]
+    needs: [smoke, lifecycle-reload, wrong-passphrase, public-guard, backend-conflict, contention-verify, fail-fast, fail-fast-holder, crash-holder, crash-waiter, stale-save, refs]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 10
