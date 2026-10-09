@@ -5,6 +5,7 @@
 //   wire(dir, { endpoint }) writes the tool's configuration, returns env vars
 //   unwire(dir)            removes what wire wrote
 //   stateMeta(bytes)       { serial, lineage } for annotations and tags
+//   stateOutputs(bytes)    { name: { value, sensitive } } of the root module
 //   LAYER_MEDIA_TYPE       media type of the stored state
 const ADAPTERS = {
   terraform: require('./terraform'),

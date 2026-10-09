@@ -1,0 +1,33 @@
+name: 'Terraform state outputs'
+description: >-
+  Root module outputs from the newest state, as step outputs. Use after
+  cnuss/actions-state and terraform apply in the same job.
+author: 'cnuss'
+
+inputs:
+  working-directory:
+    description: 'Root module directory, as given to cnuss/actions-state.'
+    required: false
+    default: '.'
+  name:
+    description: 'State name, as given to cnuss/actions-state.'
+    required: false
+    default: ''
+  include-sensitive:
+    description: 'Also set sensitive outputs, masked in logs. GitHub drops job outputs that contain masked values.'
+    required: false
+    default: 'false'
+
+outputs:
+  json:
+    description: 'All included outputs as a JSON object.'
+  sensitive:
+    description: 'Names of sensitive outputs, as a JSON array.'
+
+runs:
+  using: 'node24'
+  main: 'index.js'
+
+branding:
+  icon: 'database'
+  color: 'purple'
