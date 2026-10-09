@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
-const { resolveConfig, jobPassword, claimRunfile, waitForServer, preflightActions, preflightPackages, needsWritePreflight, post, runOutputs } = require('../../index');
+const { resolveConfig, jobPassword, claimRunfile, waitForServer, preflightActions, preflightPackages, needsWritePreflight, post, runOutputs, runScript, scriptEnv } = require('../../index');
 
 const baseEnv = {
   GITHUB_WORKSPACE: '/w', GITHUB_REPOSITORY: 'CNuss/Thing', GITHUB_REF: 'refs/heads/main', RUNNER_TEMP: '/tmp/rt',
@@ -211,4 +211,25 @@ test('runOutputs with no state yet sets empty outputs', async () => {
 test('runOutputs fails when the state is not served in this job', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'as-out-'));
   await assert.rejects(runOutputs({ env: outputsEnv(dir), print: () => {} }), /state "infra" is not served in this job/);
+});
+
+test('scriptEnv passes the step env with the backend password and without action inputs', () => {
+  const env = scriptEnv({ PATH: '/bin', CLOUDFLARE_API_TOKEN: 'cf', INPUT_PASSPHRASE: 'pp', 'INPUT_GITHUB-TOKEN': 'gh', INPUT_RUN: 'x' }, 'pw1');
+  assert.deepEqual(env, { PATH: '/bin', CLOUDFLARE_API_TOKEN: 'cf', TF_HTTP_PASSWORD: 'pw1' });
+});
+
+test('runScript runs bash in the directory with the env and returns the exit code', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'as-run-'));
+  const code = await runScript('pwd > out\necho "$GREETING" >> out', { cwd: dir, env: { ...process.env, GREETING: 'hi' }, scriptDir: dir });
+  assert.equal(code, 0);
+  assert.deepEqual(fs.readFileSync(path.join(dir, 'out'), 'utf8').split('\n'), [fs.realpathSync(dir), 'hi', '']);
+});
+
+test('runScript stops at the first failing command, pipelines included', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'as-run-'));
+  assert.equal(await runScript('false\ntouch after-false', { cwd: dir, env: process.env, scriptDir: dir }), 1);
+  assert.equal(fs.existsSync(path.join(dir, 'after-false')), false);
+  assert.equal(await runScript('false | true\ntouch after-pipe', { cwd: dir, env: process.env, scriptDir: dir }), 1);
+  assert.equal(fs.existsSync(path.join(dir, 'after-pipe')), false);
+  assert.equal(await runScript('exit 7', { cwd: dir, env: process.env, scriptDir: dir }), 7);
 });
