@@ -29,6 +29,10 @@ inputs:
     description: 'Let refs other than the default branch apply and save state. Locks taken on other refs do not exclude each other.'
     required: false
     default: 'false'
+  include-sensitive:
+    description: 'Also set sensitive Terraform outputs, masked in logs. GitHub drops job outputs that contain masked values.'
+    required: false
+    default: 'false'
   run:
     description: 'Commands to run in working-directory once the backend is up, like a bash run step (bash -e -o pipefail) with this step''s env. The state server stays up for later steps.'
     required: false
@@ -45,8 +49,10 @@ outputs:
     description: 'The state package, ghcr.io/<owner>/<repo>/actions-state.'
   address:
     description: 'The local state URL Terraform uses.'
-  outputs:
-    description: 'Non-sensitive root module outputs as a JSON object: of the state after run when given, else of the state as loaded.'
+  json:
+    description: 'Terraform root module outputs as a JSON object: of the state after run when given, else of the state as loaded. Each output is also a step output of its own name.'
+  sensitive:
+    description: 'Names of sensitive Terraform outputs, as a JSON array.'
 
 runs:
   using: 'node24'

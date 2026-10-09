@@ -32,11 +32,12 @@ test('toStepOutputs with includeSensitive passes them and masks every line', () 
   assert.ok(r.json.includes('line1'));
 });
 
-test('toStepOutputs skips outputs named like its own and warns', () => {
-  const r = toStepOutputs({ json: { value: 'a', sensitive: false }, sensitive: { value: 'b', sensitive: false }, ok: { value: 'c', sensitive: false } });
-  assert.deepEqual(r.entries, [['ok', 'c']]);
-  assert.equal(r.json, '{"json":"a","sensitive":"b","ok":"c"}');
-  assert.equal(r.warnings.length, 2);
+test('toStepOutputs keeps outputs named like the action outputs only in json, and warns', () => {
+  const names = ['json', 'sensitive', 'state-name', 'image', 'address'];
+  const r = toStepOutputs(Object.fromEntries([...names, 'ok'].map((n) => [n, { value: n, sensitive: false }])));
+  assert.deepEqual(r.entries, [['ok', 'ok']]);
+  assert.deepEqual(Object.keys(JSON.parse(r.json)), [...names, 'ok']);
+  assert.equal(r.warnings.length, names.length);
 });
 
 test('toStepOutputs with no outputs', () => {

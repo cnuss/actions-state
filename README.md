@@ -60,6 +60,7 @@ listed in `.git/info/exclude`.
 | `lock-timeout` | `600` | Seconds to wait for a lock held by another job. `0` fails at once. |
 | `replace-backend` | `false` | Proceed even if the configuration declares a backend. |
 | `allow-apply-from-any-ref` | `false` | Let refs other than the default branch apply. |
+| `include-sensitive` | `false` | Also set sensitive Terraform outputs as step outputs. See [Terraform outputs](#terraform-outputs). |
 | `run` | | Commands to run in `working-directory` once the backend is up. See [Running Terraform in the step](#running-terraform-in-the-step). |
 | `github-token` | `${{ github.token }}` | Needs `actions: write` and `packages: write`. |
 
@@ -92,7 +93,9 @@ the package.
 | `state-name` | The resolved state name. |
 | `image` | The state package. |
 | `address` | The local state URL. |
-| `outputs` | Non-sensitive root module outputs as a JSON object: of the state after `run` when given, else of the state as loaded (`{}` before the first apply). |
+| `<output name>` | Each Terraform root module output. See [Terraform outputs](#terraform-outputs). |
+| `json` | All included Terraform outputs as one JSON object (`{}` before the first apply). |
+| `sensitive` | Names of sensitive Terraform outputs, as a JSON array. |
 
 ## Running Terraform in the step
 
@@ -111,16 +114,16 @@ step can replace the action plus a separate `run:` step:
             terraform apply -input=false -auto-approve
       - run: echo "$REGION"
         env:
-          REGION: ${{ fromJSON(steps.state.outputs.outputs).environments.prod.region }}
+          REGION: ${{ fromJSON(steps.state.outputs.environments).prod.region }}
 ```
 
 - It runs like a bash `run:` step (`bash -e -o pipefail`) with the step's
   `env`, and its output streams to the log. A failing command fails the step.
 - The action's inputs (the passphrase and token) are not in its environment.
-- After it, `outputs` holds the newest state's outputs. Lines the script
-  writes to `$GITHUB_OUTPUT` become outputs of this step.
-- The state server stays up for later steps in the job, such as
-  `cnuss/actions-state/outputs`.
+- The step's [Terraform outputs](#terraform-outputs) come from the state the
+  script leaves. Lines the script writes to `$GITHUB_OUTPUT` become outputs of
+  this step too.
+- The state server stays up for later steps in the job.
 - The script appears in the step's log header, like any input; keep secrets
   in `env`.
 
@@ -167,9 +170,9 @@ so set `passphrase` to encrypt it, even in a private repository.
 
 ## Terraform outputs
 
-`cnuss/actions-state/outputs` turns the root module outputs of the newest
-state into step outputs. Use it after `apply`, with the same
-`working-directory` or `name`:
+The action sets each root module output as a step output of the same name:
+from the state after `run` when it is given, otherwise from the state as
+loaded when the step starts. To use the result of an `apply`, run it in `run`:
 
 ```yaml
 jobs:
@@ -179,13 +182,13 @@ jobs:
       environments: ${{ steps.tf.outputs.environments }}
     steps:
       - uses: actions/checkout@v6
-      - uses: cnuss/actions-state@v1
+      - id: tf
+        uses: cnuss/actions-state@v1
         with:
           passphrase: ${{ secrets.STATE_PASSPHRASE }}
-      - run: terraform init
-      - run: terraform apply -auto-approve
-      - id: tf
-        uses: cnuss/actions-state/outputs@v1
+          run: |
+            terraform init -input=false
+            terraform apply -input=false -auto-approve
       - run: echo "$URL"
         env:
           URL: ${{ steps.tf.outputs.url }}
@@ -199,18 +202,18 @@ jobs:
           REGION: ${{ fromJSON(needs.apply.outputs.environments).prod.region }}
 ```
 
-- Each output becomes a step output of the same name. Strings are passed as
-  they are; numbers, booleans, lists, maps and nested combinations are JSON,
-  so read into them with `fromJSON(...)`.
+- Strings are passed as they are; numbers, booleans, lists, maps and nested
+  combinations are JSON, so read into them with `fromJSON(...)`.
 - `json` holds every included output as one JSON object, so
   `fromJSON(steps.tf.outputs.json).<name>` works for strings too.
 - Sensitive outputs are left out and their names listed in `sensitive` (a JSON
   array). `include-sensitive: true` sets them too, masked in logs, but GitHub
   drops job outputs that contain masked values, so they only reach later steps
   of the same job.
-- An output named `json` or `sensitive` is only in `json`.
-- A job that only reads state does not need Terraform: the main action's
-  `outputs` output has the outputs of the state it loaded.
+- An output named `json`, `sensitive`, `state-name`, `image` or `address` is
+  only in `json`.
+- A job that only reads state needs no Terraform: without `run`, the outputs
+  are those of the state it loaded.
 
 ## Moving existing state
 

@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
-const { resolveConfig, jobPassword, claimRunfile, waitForServer, preflightActions, preflightPackages, needsWritePreflight, post, runOutputs, runScript, scriptEnv } = require('../../index');
+const { resolveConfig, jobPassword, claimRunfile, waitForServer, preflightActions, preflightPackages, needsWritePreflight, post, emitOutputs, fetchOutputs, runScript, scriptEnv } = require('../../index');
 
 const baseEnv = {
   GITHUB_WORKSPACE: '/w', GITHUB_REPOSITORY: 'CNuss/Thing', GITHUB_REF: 'refs/heads/main', RUNNER_TEMP: '/tmp/rt',
@@ -161,56 +161,50 @@ async function stateServer(state, password) {
   return server;
 }
 
-function outputsEnv(dir, extra = {}) {
-  const output = path.join(dir, 'output');
-  fs.writeFileSync(output, '');
-  return { ...baseEnv, RUNNER_TEMP: dir, GITHUB_OUTPUT: output, 'INPUT_WORKING-DIRECTORY': 'infra', ...extra };
+function outputFile() {
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'as-out-')), 'output');
+  fs.writeFileSync(file, '');
+  return file;
 }
 
-test('runOutputs sets step outputs from the served state', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'as-out-'));
-  const state = { version: 4, outputs: { url: { value: 'https://x' }, tags: { value: { a: { b: { c: [1, 'two'] } } } }, pw: { value: 's3cr3t', sensitive: true } } };
-  const server = await stateServer(state, 'pw1');
+const served = { version: 4, outputs: { url: { value: 'https://x' }, tags: { value: { a: { b: { c: [1, 'two'] } } } }, pw: { value: 's3cr3t', sensitive: true } } };
+
+test('fetchOutputs reads the served state, and {} before the first save', async () => {
+  const server = await stateServer(served, 'pw1');
+  const empty = await stateServer(null, 'pw1');
   try {
-    fs.mkdirSync(path.join(dir, 'actions-state'));
-    fs.writeFileSync(path.join(dir, 'actions-state', 'password'), 'pw1');
-    fs.writeFileSync(path.join(dir, 'actions-state', 'infra.json'), JSON.stringify({ port: server.address().port }));
-    const env = outputsEnv(dir);
-    const printed = [];
-    await runOutputs({ env, print: (m) => printed.push(m) });
-    assert.deepEqual(readCommandFile(env.GITHUB_OUTPUT), {
-      url: 'https://x', tags: '{"a":{"b":{"c":[1,"two"]}}}', json: '{"url":"https://x","tags":{"a":{"b":{"c":[1,"two"]}}}}', sensitive: '["pw"]',
+    assert.deepEqual(await fetchOutputs(`http://127.0.0.1:${server.address().port}`, 'pw1'), {
+      url: { value: 'https://x', sensitive: false }, tags: { value: { a: { b: { c: [1, 'two'] } } }, sensitive: false }, pw: { value: 's3cr3t', sensitive: true },
     });
-    assert.ok(!printed.join('\n').includes('s3cr3t'));
-
-    const env2 = outputsEnv(dir, { 'INPUT_INCLUDE-SENSITIVE': 'true' });
-    const printed2 = [];
-    await runOutputs({ env: env2, print: (m) => printed2.push(m) });
-    assert.equal(readCommandFile(env2.GITHUB_OUTPUT).pw, 's3cr3t');
-    assert.ok(printed2.includes('::add-mask::s3cr3t'));
+    assert.deepEqual(await fetchOutputs(`http://127.0.0.1:${empty.address().port}`, 'pw1'), {});
+    await assert.rejects(fetchOutputs(`http://127.0.0.1:${server.address().port}`, 'wrong'), /reading state failed: HTTP 401/);
   } finally {
     server.close();
+    empty.close();
   }
 });
 
-test('runOutputs with no state yet sets empty outputs', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'as-out-'));
-  const server = await stateServer(null, 'pw1');
-  try {
-    fs.mkdirSync(path.join(dir, 'actions-state'));
-    fs.writeFileSync(path.join(dir, 'actions-state', 'password'), 'pw1');
-    fs.writeFileSync(path.join(dir, 'actions-state', 'infra.json'), JSON.stringify({ port: server.address().port }));
-    const env = outputsEnv(dir);
-    await runOutputs({ env, print: () => {} });
-    assert.deepEqual(readCommandFile(env.GITHUB_OUTPUT), { json: '{}', sensitive: '[]' });
-  } finally {
-    server.close();
-  }
+test('emitOutputs sets one step output per output plus json and sensitive', () => {
+  const file = outputFile();
+  const printed = [];
+  emitOutputs({ url: { value: 'https://x', sensitive: false }, tags: { value: { a: { b: [1] } }, sensitive: false }, pw: { value: 's3cr3t', sensitive: true } },
+    { env: { GITHUB_OUTPUT: file }, print: (m) => printed.push(m) });
+  assert.deepEqual(readCommandFile(file), { url: 'https://x', tags: '{"a":{"b":[1]}}', json: '{"url":"https://x","tags":{"a":{"b":[1]}}}', sensitive: '["pw"]' });
+  assert.ok(!printed.join('\n').includes('s3cr3t'));
 });
 
-test('runOutputs fails when the state is not served in this job', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'as-out-'));
-  await assert.rejects(runOutputs({ env: outputsEnv(dir), print: () => {} }), /state "infra" is not served in this job/);
+test('emitOutputs with includeSensitive sets and masks sensitive outputs', () => {
+  const file = outputFile();
+  const printed = [];
+  emitOutputs({ pw: { value: 's3cr3t', sensitive: true } }, { env: { GITHUB_OUTPUT: file }, print: (m) => printed.push(m), includeSensitive: true });
+  assert.deepEqual(readCommandFile(file), { pw: 's3cr3t', json: '{"pw":"s3cr3t"}', sensitive: '["pw"]' });
+  assert.equal(printed[0], '::add-mask::s3cr3t');
+});
+
+test('emitOutputs with no outputs sets empty json and sensitive', () => {
+  const file = outputFile();
+  emitOutputs({}, { env: { GITHUB_OUTPUT: file }, print: () => {} });
+  assert.deepEqual(readCommandFile(file), { json: '{}', sensitive: '[]' });
 });
 
 test('scriptEnv passes the step env with the backend password and without action inputs', () => {

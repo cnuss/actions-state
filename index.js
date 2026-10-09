@@ -156,25 +156,15 @@ async function fetchOutputs(endpoint, password) {
   return getAdapter('terraform').stateOutputs(r.buffer);
 }
 
-// The outputs sub-action: step outputs from the newest state the server in
-// this job holds.
-async function runOutputs({ env = process.env, print = log } = {}) {
-  const cfg = resolveConfig(env);
-  let run = {};
-  try { run = JSON.parse(fs.readFileSync(path.join(cfg.runDir, `${cfg.slug}.json`), 'utf8')); } catch { /* not served */ }
-  let password = '';
-  try { password = fs.readFileSync(path.join(cfg.runDir, 'password'), 'utf8'); } catch { /* not served */ }
-  if (!run.port || !password) {
-    throw new Error(`state "${cfg.name}" is not served in this job: use cnuss/actions-state with the same working-directory or name earlier in the job`);
-  }
-  const outputs = await fetchOutputs(`http://127.0.0.1:${run.port}`, password);
-  const result = toStepOutputs(outputs, { includeSensitive: input(env, 'include-sensitive') === 'true' });
+// One step output per root output, plus json and sensitive.
+function emitOutputs(outputs, { env = process.env, print = log, includeSensitive = false } = {}) {
+  const result = toStepOutputs(outputs, { includeSensitive });
   for (const value of result.masks) print(`::add-mask::${value}`);
   for (const w of result.warnings) print(`::warning::[actions-state] ${w}`);
   for (const [name, value] of result.entries) appendCommandFile(env.GITHUB_OUTPUT, name, value);
   appendCommandFile(env.GITHUB_OUTPUT, 'json', result.json);
   appendCommandFile(env.GITHUB_OUTPUT, 'sensitive', JSON.stringify(result.sensitive));
-  print(`[actions-state] set ${result.entries.length} outputs from "${cfg.name}"${result.sensitive.length ? `; sensitive: ${result.sensitive.join(', ')}` : ''}`);
+  return result;
 }
 
 async function main() {
@@ -246,7 +236,8 @@ async function main() {
     const code = await runScript(script, { cwd: cfg.workingDirectory, env: scriptEnv(env, password), scriptDir: cfg.runDir });
     if (code !== 0) throw new Error(`the run script exited with code ${code}`);
   }
-  setOutput('outputs', toStepOutputs(await fetchOutputs(endpoint, password)).json);
+  const { entries, sensitive } = emitOutputs(await fetchOutputs(endpoint, password), { includeSensitive: input(env, 'include-sensitive') === 'true' });
+  log(`[actions-state] set ${entries.length} outputs${sensitive.length ? `; sensitive: ${sensitive.join(', ')}` : ''}`);
 }
 
 // Every step runs even when an earlier one fails.
@@ -298,7 +289,7 @@ async function post({ env = process.env, print = log } = {}) {
   });
 }
 
-module.exports = { resolveConfig, jobPassword, claimRunfile, waitForServer, preflightActions, preflightPackages, needsWritePreflight, post, runOutputs, runScript, scriptEnv };
+module.exports = { resolveConfig, jobPassword, claimRunfile, waitForServer, preflightActions, preflightPackages, needsWritePreflight, post, emitOutputs, fetchOutputs, runScript, scriptEnv };
 
 if (require.main === module) {
   const run = process.env.STATE_post === 'true' ? post : main;

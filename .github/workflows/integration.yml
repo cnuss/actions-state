@@ -50,8 +50,8 @@ jobs:
           allow-apply-from-any-ref: true
       - name: A new state has no outputs
         env:
-          OUTPUTS: ${{ steps.state.outputs.outputs }}
-        run: test "$OUTPUTS" = '{}'
+          JSON: ${{ steps.state.outputs.json }}
+        run: test "$JSON" = '{}'
       - name: First apply creates state
         working-directory: ${{ env.FIXTURE }}
         run: |
@@ -67,7 +67,7 @@ jobs:
       matrix:
         tool: [terraform, tofu]
     outputs:
-      environments: ${{ steps.tf.outputs.environments }}
+      environments: ${{ steps.state.outputs.environments }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: test/scripts/install-tool.sh ${{ matrix.tool }}
@@ -95,48 +95,27 @@ jobs:
             ${{ matrix.tool }} state list | grep -qx null_resource.smoke
             ${{ matrix.tool }} plan -detailed-exitcode -input=false
             echo "from_script=yes" >> "$GITHUB_OUTPUT"
-      - name: The action's outputs reflect the state after the run script
+      - name: Outputs of the state after the run script are step outputs, and nested ones work with fromJSON
         env:
           SECRET: ${{ secrets.SMOKE_SECRET }}
-          OUTPUTS: ${{ steps.state.outputs.outputs }}
+          JSON: ${{ steps.state.outputs.json }}
+          GREETING: ${{ steps.state.outputs.greeting }}
+          SECRET_SHA: ${{ steps.state.outputs.secret_sha }}
+          SENSITIVE: ${{ steps.state.outputs.sensitive }}
+          SECRET_LEFT_OUT: ${{ steps.state.outputs.secret }}
           FROM_SCRIPT: ${{ steps.state.outputs.from_script }}
-          PROD_TEAM: ${{ fromJSON(steps.state.outputs.outputs).environments.prod.tags.team }}
-        run: |
-          test/scripts/check-outputs.sh "$OUTPUTS" "$SECRET"
-          test "$FROM_SCRIPT" = yes
-          test "$PROD_TEAM" = core
-      - id: tf
-        uses: ./outputs
-        with:
-          working-directory: test/fixtures/null
-          name: ${{ env.PREFIX }}-smoke-${{ matrix.tool }}
-      - id: tf-sensitive
-        uses: ./outputs
-        with:
-          working-directory: test/fixtures/null
-          name: ${{ env.PREFIX }}-smoke-${{ matrix.tool }}
-          include-sensitive: true
-      - name: Outputs are step outputs, and nested ones work with fromJSON
-        env:
-          SECRET: ${{ secrets.SMOKE_SECRET }}
-          JSON: ${{ steps.tf.outputs.json }}
-          GREETING: ${{ steps.tf.outputs.greeting }}
-          SECRET_SHA: ${{ steps.tf.outputs.secret_sha }}
-          SENSITIVE: ${{ steps.tf.outputs.sensitive }}
-          SECRET_LEFT_OUT: ${{ steps.tf.outputs.secret }}
-          SECRET_INCLUDED: ${{ steps.tf-sensitive.outputs.secret }}
-          PROD_TEAM: ${{ fromJSON(steps.tf.outputs.environments).prod.tags.team }}
-          DEV_REPLICAS: ${{ fromJSON(steps.tf.outputs.environments).dev.replicas }}
-          SECOND_ZONE: ${{ fromJSON(steps.tf.outputs.subnets)[0].zones[1] }}
-          FROM_JSON_REGION: ${{ fromJSON(steps.tf.outputs.json).environments.dev.region }}
-          FROM_JSON_GREETING: ${{ fromJSON(steps.tf.outputs.json).greeting }}
+          PROD_TEAM: ${{ fromJSON(steps.state.outputs.environments).prod.tags.team }}
+          DEV_REPLICAS: ${{ fromJSON(steps.state.outputs.environments).dev.replicas }}
+          SECOND_ZONE: ${{ fromJSON(steps.state.outputs.subnets)[0].zones[1] }}
+          FROM_JSON_REGION: ${{ fromJSON(steps.state.outputs.json).environments.dev.region }}
+          FROM_JSON_GREETING: ${{ fromJSON(steps.state.outputs.json).greeting }}
         run: |
           test/scripts/check-outputs.sh "$JSON" "$SECRET"
           test "$GREETING" = hello
           test "$SECRET_SHA" = "$(printf %s "$SECRET" | sha256sum | cut -d' ' -f1)"
           test "$SENSITIVE" = '["secret"]'
           test -z "$SECRET_LEFT_OUT"
-          test "$SECRET_INCLUDED" = "$SECRET"
+          test "$FROM_SCRIPT" = yes
           test "$PROD_TEAM" = core
           test "$DEV_REPLICAS" = 1
           test "$SECOND_ZONE" = b
@@ -161,14 +140,20 @@ jobs:
           name: ${{ env.PREFIX }}-smoke-${{ matrix.tool }}
           passphrase: ${{ env.PASSPHRASE }}
           allow-apply-from-any-ref: true
-      - name: A new job reads the outputs from state and from the job outputs
+          include-sensitive: true
+      - name: A new job reads the outputs of the loaded state, sensitive ones included, and the job outputs
         env:
           SECRET: ${{ secrets.SMOKE_SECRET }}
-          OUTPUTS: ${{ steps.state.outputs.outputs }}
-          STATE_PROD_REGION: ${{ fromJSON(steps.state.outputs.outputs).environments.prod.region }}
+          JSON: ${{ steps.state.outputs.json }}
+          SECRET_INCLUDED: ${{ steps.state.outputs.secret }}
+          SENSITIVE: ${{ steps.state.outputs.sensitive }}
+          STATE_PROD_REGION: ${{ fromJSON(steps.state.outputs.environments).prod.region }}
           JOB_PROD_REPLICAS: ${{ fromJSON(needs.smoke.outputs.environments).prod.replicas }}
         run: |
-          test/scripts/check-outputs.sh "$OUTPUTS" "$SECRET"
+          test "$SECRET_INCLUDED" = "$SECRET"
+          test "$(jq -r .secret <<<"$JSON")" = "$SECRET"
+          test "$SENSITIVE" = '["secret"]'
+          test/scripts/check-outputs.sh "$(jq -c 'del(.secret)' <<<"$JSON")" "$SECRET"
           test "$STATE_PROD_REGION" = us-east-1
           test "$JOB_PROD_REPLICAS" = 3
       - name: Destroy empties the state
