@@ -129,6 +129,26 @@ function basicAuth(password) {
   return { Authorization: `Basic ${Buffer.from(`actions-state:${password}`).toString('base64')}` };
 }
 
+// A run step's environment: the step env and the backend password, without
+// the action's inputs (passphrase, token).
+function scriptEnv(env, password) {
+  const result = {};
+  for (const [k, v] of Object.entries(env)) if (!k.startsWith('INPUT_')) result[k] = v;
+  result.TF_HTTP_PASSWORD = password;
+  return result;
+}
+
+// Runs like a bash `run:` step: GitHub's default bash flags, output streamed.
+function runScript(script, { cwd, env, scriptDir }) {
+  const file = path.join(scriptDir, `run-${crypto.randomBytes(8).toString('hex')}.sh`);
+  fs.writeFileSync(file, `${script}\n`, { mode: 0o600 });
+  return new Promise((resolve, reject) => {
+    const child = spawn('bash', ['--noprofile', '--norc', '-eo', 'pipefail', file], { cwd, env, stdio: 'inherit' });
+    child.on('error', reject);
+    child.on('close', (code) => resolve(code ?? 1));
+  }).finally(() => fs.rmSync(file, { force: true }));
+}
+
 async function fetchOutputs(endpoint, password) {
   const r = await request('GET', `${endpoint}/state`, basicAuth(password), null, { timeoutMs: 60_000 });
   if (r.status === 404) return {};
@@ -218,9 +238,15 @@ async function main() {
   setOutput('state-name', cfg.name);
   setOutput('image', `ghcr.io/${cfg.image}`);
   setOutput('address', `${endpoint}/state`);
-  setOutput('outputs', toStepOutputs(await fetchOutputs(endpoint, password)).json);
   const mode = isDefaultRef ? 'read/write' : cfg.allowAnyRef ? 'read/write (allow-apply-from-any-ref)' : 'plan only';
   log(`[actions-state] serving "${cfg.name}" from ghcr.io/${cfg.image}:${cfg.slug} (${mode}) at ${endpoint}`);
+
+  const script = input(env, 'run');
+  if (script) {
+    const code = await runScript(script, { cwd: cfg.workingDirectory, env: scriptEnv(env, password), scriptDir: cfg.runDir });
+    if (code !== 0) throw new Error(`the run script exited with code ${code}`);
+  }
+  setOutput('outputs', toStepOutputs(await fetchOutputs(endpoint, password)).json);
 }
 
 // Every step runs even when an earlier one fails.
@@ -272,7 +298,7 @@ async function post({ env = process.env, print = log } = {}) {
   });
 }
 
-module.exports = { resolveConfig, jobPassword, claimRunfile, waitForServer, preflightActions, preflightPackages, needsWritePreflight, post, runOutputs };
+module.exports = { resolveConfig, jobPassword, claimRunfile, waitForServer, preflightActions, preflightPackages, needsWritePreflight, post, runOutputs, runScript, scriptEnv };
 
 if (require.main === module) {
   const run = process.env.STATE_post === 'true' ? post : main;

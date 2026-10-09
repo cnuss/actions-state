@@ -41,12 +41,17 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: test/scripts/install-tool.sh ${{ matrix.tool }}
-      - uses: ./
+      - id: state
+        uses: ./
         with:
           working-directory: ${{ env.FIXTURE }}
           name: ${{ env.PREFIX }}-lifecycle-${{ matrix.tool }}
           passphrase: ${{ env.PASSPHRASE }}
           allow-apply-from-any-ref: true
+      - name: A new state has no outputs
+        env:
+          OUTPUTS: ${{ steps.state.outputs.outputs }}
+        run: test "$OUTPUTS" = '{}'
       - name: First apply creates state
         working-directory: ${{ env.FIXTURE }}
         run: |
@@ -66,30 +71,40 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: test/scripts/install-tool.sh ${{ matrix.tool }}
-      - id: state
+      - name: Apply a provider-backed resource with a secret variable, in the action step
+        id: state
         uses: ./
+        env:
+          TF_VAR_secret: ${{ secrets.SMOKE_SECRET }}
         with:
           working-directory: test/fixtures/null
           name: ${{ env.PREFIX }}-smoke-${{ matrix.tool }}
           passphrase: ${{ env.PASSPHRASE }}
           allow-apply-from-any-ref: true
-      - name: A new state has no outputs
+          run: |
+            if [ -z "$TF_VAR_secret" ]; then
+              echo "::error::the SMOKE_SECRET repository secret is not available to this run"
+              exit 1
+            fi
+            if env | grep -q '^INPUT_'; then
+              echo "::error::the action's inputs reached the run script"
+              exit 1
+            fi
+            ${{ matrix.tool }} init -input=false
+            ${{ matrix.tool }} apply -auto-approve -input=false
+            ${{ matrix.tool }} state list | grep -qx null_resource.smoke
+            ${{ matrix.tool }} plan -detailed-exitcode -input=false
+            echo "from_script=yes" >> "$GITHUB_OUTPUT"
+      - name: The action's outputs reflect the state after the run script
         env:
+          SECRET: ${{ secrets.SMOKE_SECRET }}
           OUTPUTS: ${{ steps.state.outputs.outputs }}
-        run: test "$OUTPUTS" = '{}'
-      - name: Apply a provider-backed resource with a secret variable
-        working-directory: test/fixtures/null
-        env:
-          TF_VAR_secret: ${{ secrets.SMOKE_SECRET }}
+          FROM_SCRIPT: ${{ steps.state.outputs.from_script }}
+          PROD_TEAM: ${{ fromJSON(steps.state.outputs.outputs).environments.prod.tags.team }}
         run: |
-          if [ -z "$TF_VAR_secret" ]; then
-            echo "::error::the SMOKE_SECRET repository secret is not available to this run"
-            exit 1
-          fi
-          ${{ matrix.tool }} init -input=false
-          ${{ matrix.tool }} apply -auto-approve -input=false
-          ${{ matrix.tool }} state list | grep -qx null_resource.smoke
-          ${{ matrix.tool }} plan -detailed-exitcode -input=false
+          test/scripts/check-outputs.sh "$OUTPUTS" "$SECRET"
+          test "$FROM_SCRIPT" = yes
+          test "$PROD_TEAM" = core
       - id: tf
         uses: ./outputs
         with:
@@ -168,6 +183,36 @@ jobs:
             exit 1
           fi
       - run: node test/scripts/inspect.js "$PREFIX-smoke-${{ matrix.tool }}" --expect-encrypted --min-serial 2
+
+  run-fails:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: test/scripts/install-tool.sh terraform
+      - id: failing
+        continue-on-error: true
+        uses: ./
+        with:
+          working-directory: ${{ env.FIXTURE }}
+          name: ${{ env.PREFIX }}-run-fails
+          passphrase: ${{ env.PASSPHRASE }}
+          allow-apply-from-any-ref: true
+          run: |
+            terraform init -input=false
+            touch "$RUNNER_TEMP/after-init"
+            false | true
+            touch "$RUNNER_TEMP/after-pipe"
+      - name: A failing run script fails the step at the failing command
+        env:
+          OUTCOME: ${{ steps.failing.outcome }}
+        run: |
+          test "$OUTCOME" = failure
+          test -e "$RUNNER_TEMP/after-init"
+          if [ -e "$RUNNER_TEMP/after-pipe" ]; then
+            echo "::error::the script kept going after a failed pipeline"
+            exit 1
+          fi
 
   lifecycle-reload:
     needs: lifecycle
@@ -489,7 +534,7 @@ jobs:
           grep -q 'may only plan' "$RUNNER_TEMP/apply.log"
 
   cleanup:
-    needs: [smoke-reload, lifecycle-reload, wrong-passphrase, public-guard, backend-conflict, contention-verify, fail-fast, fail-fast-holder, crash-holder, crash-waiter, stale-save, refs]
+    needs: [smoke-reload, run-fails, lifecycle-reload, wrong-passphrase, public-guard, backend-conflict, contention-verify, fail-fast, fail-fast-holder, crash-holder, crash-waiter, stale-save, refs]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 10

@@ -29,6 +29,10 @@ inputs:
     description: 'Let refs other than the default branch apply and save state. Locks taken on other refs do not exclude each other.'
     required: false
     default: 'false'
+  run:
+    description: 'Commands to run in working-directory once the backend is up, like a bash run step (bash -e -o pipefail) with this step''s env. The state server stays up for later steps.'
+    required: false
+    default: ''
   github-token:
     description: 'Token for the cache, packages and REST calls. Needs actions: write and packages: write.'
     required: false
@@ -42,7 +46,7 @@ outputs:
   address:
     description: 'The local state URL Terraform uses.'
   outputs:
-    description: 'Non-sensitive root module outputs of the state as loaded, as a JSON object.'
+    description: 'Non-sensitive root module outputs as a JSON object: of the state after run when given, else of the state as loaded.'
 
 runs:
   using: 'node24'

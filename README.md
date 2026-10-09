@@ -60,6 +60,7 @@ listed in `.git/info/exclude`.
 | `lock-timeout` | `600` | Seconds to wait for a lock held by another job. `0` fails at once. |
 | `replace-backend` | `false` | Proceed even if the configuration declares a backend. |
 | `allow-apply-from-any-ref` | `false` | Let refs other than the default branch apply. |
+| `run` | | Commands to run in `working-directory` once the backend is up. See [Running Terraform in the step](#running-terraform-in-the-step). |
 | `github-token` | `${{ github.token }}` | Needs `actions: write` and `packages: write`. |
 
 ## Names
@@ -91,7 +92,37 @@ the package.
 | `state-name` | The resolved state name. |
 | `image` | The state package. |
 | `address` | The local state URL. |
-| `outputs` | Non-sensitive root module outputs of the state as loaded, as a JSON object (`{}` before the first apply). |
+| `outputs` | Non-sensitive root module outputs as a JSON object: of the state after `run` when given, else of the state as loaded (`{}` before the first apply). |
+
+## Running Terraform in the step
+
+`run` runs commands in `working-directory` once the backend is up, so one
+step can replace the action plus a separate `run:` step:
+
+```yaml
+      - id: state
+        uses: cnuss/actions-state@v1
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+        with:
+          passphrase: ${{ secrets.STATE_PASSPHRASE }}
+          run: |
+            terraform init -input=false
+            terraform apply -input=false -auto-approve
+      - run: echo "$REGION"
+        env:
+          REGION: ${{ fromJSON(steps.state.outputs.outputs).environments.prod.region }}
+```
+
+- It runs like a bash `run:` step (`bash -e -o pipefail`) with the step's
+  `env`, and its output streams to the log. A failing command fails the step.
+- The action's inputs (the passphrase and token) are not in its environment.
+- After it, `outputs` holds the newest state's outputs. Lines the script
+  writes to `$GITHUB_OUTPUT` become outputs of this step.
+- The state server stays up for later steps in the job, such as
+  `cnuss/actions-state/outputs`.
+- The script appears in the step's log header, like any input; keep secrets
+  in `env`.
 
 ## Several root modules
 
