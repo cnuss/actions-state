@@ -426,15 +426,19 @@ jobs:
           name: ${{ env.PREFIX }}-crash
           passphrase: ${{ env.PASSPHRASE }}
           allow-apply-from-any-ref: true
-      # Deleting the runfile leaves the post step nothing to release, so the
-      # job ends holding the lock.
-      - name: Create state, take the lock, then crash the server
+      - name: Create state
         working-directory: ${{ env.FIXTURE }}
         run: |
           terraform init -input=false
           terraform apply -auto-approve -input=false -var value=a
+      # Deleting the runfile leaves the post step nothing to release, so the
+      # job ends holding the lock.
+      - name: Take the lock, then crash the server
+        working-directory: ${{ env.FIXTURE }}
+        run: |
           terraform apply -auto-approve -input=false -var value=b -var sleep=600 &
-          sleep 30
+          since=$("$GITHUB_WORKSPACE"/test/scripts/await.sh step crash-holder "Take the lock, then crash the server")
+          "$GITHUB_WORKSPACE"/test/scripts/await.sh lock "$PREFIX-crash" "$since"
           runfile=$(ls "$RUNNER_TEMP"/actions-state/*.json)
           kill -9 "$(jq -r .pid "$runfile")"
           pkill -9 -f 'terraform apply' || true
@@ -446,10 +450,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: test/scripts/install-tool.sh terraform
-      - name: Wait for the holder's first version, then for it to take the lock
+      - name: Wait for the holder to take the lock for its second apply
         run: |
-          node test/scripts/inspect.js "$PREFIX-crash" --wait 600
-          sleep 30
+          since=$(test/scripts/await.sh step crash-holder "Take the lock, then crash the server")
+          test/scripts/await.sh lock "$PREFIX-crash" "$since"
       - uses: ./
         with:
           working-directory: ${{ env.FIXTURE }}
