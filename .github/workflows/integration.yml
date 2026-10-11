@@ -374,12 +374,16 @@ jobs:
           name: ${{ env.PREFIX }}-failfast
           passphrase: ${{ env.PASSPHRASE }}
           allow-apply-from-any-ref: true
-      - name: Create state, then hold the lock for two minutes
+      - name: Create state
         working-directory: ${{ env.FIXTURE }}
         run: |
           terraform init -input=false
           terraform apply -auto-approve -input=false -var value=a
-          terraform apply -auto-approve -input=false -var value=b -var sleep=120
+      - name: Hold the lock until fail-fast is done
+        working-directory: ${{ env.FIXTURE }}
+        run: |
+          terraform apply -auto-approve -input=false -var value=b \
+            -var hold='"$GITHUB_WORKSPACE"/test/scripts/await.sh job fail-fast || true'
 
   fail-fast:
     runs-on: ubuntu-latest
@@ -387,10 +391,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: test/scripts/install-tool.sh terraform
-      - name: Wait for the holder's first version, then for it to take the lock
+      - name: Wait for the holder to take the lock for its second apply
         run: |
-          node test/scripts/inspect.js "$PREFIX-failfast" --wait 600
-          sleep 30
+          since=$(test/scripts/await.sh step fail-fast-holder "Hold the lock until fail-fast is done")
+          test/scripts/await.sh lock "$PREFIX-failfast" "$since"
       - uses: ./
         with:
           working-directory: ${{ env.FIXTURE }}
