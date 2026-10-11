@@ -8,14 +8,21 @@ variable "sleep" {
   default = 0
 }
 
+# A command to hold the apply open with instead of sleeping.
+variable "hold" {
+  type    = string
+  default = ""
+}
+
 # Replaced whenever value changes, so every apply that changes value writes a
-# new serial; the provisioner holds the apply open for var.sleep seconds.
+# new serial; the provisioner holds the apply open for var.sleep seconds, or
+# until var.hold exits.
 resource "terraform_data" "data" {
   input            = var.value
   triggers_replace = var.value
 
   provisioner "local-exec" {
-    command = "sleep ${var.sleep}"
+    command = var.hold != "" ? var.hold : "sleep ${var.sleep}"
   }
 }
 
