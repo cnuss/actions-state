@@ -217,17 +217,16 @@ jobs:
   are those of the state it loaded.
 - The outputs are also written to the step summary, under an h2 heading that
   names the state (the summaries of all steps share one page), with one
-  section per output.
-  A map or object is a key and value table, sorted by key. A nested map of
-  scalars is a collapsed table under its key, and a deeper one gets its own
-  heading. A list of scalars is joined with commas; other lists are JSON.
+  section per output. A map or object is a key and value table, sorted by
+  key; a nested map is a table inside its row. A map whose values are all
+  maps gets a heading per key instead. A list of scalars is joined with
+  commas; other lists are JSON.
 - Sensitive outputs appear in the summary by name only, whatever
   `include-sensitive` says. Other values are written unchanged, so GitHub
-  still masks secrets in them: an entry with a `|` or a line break goes below
-  the table instead of being escaped, and a value over 2048 characters is
-  left out. A summary that would pass GitHub's 1 MiB limit is cut off at the
-  end. If the summary can't be written, the step warns and goes on.
-  `summary: false` turns it off.
+  still masks secrets in them; a value over 2048 characters is left out. A
+  summary that would pass GitHub's 1 MiB limit is cut off at the end. If the
+  summary can't be written, the step warns and goes on. `summary: false`
+  turns it off.
 
 ## Moving existing state
 
