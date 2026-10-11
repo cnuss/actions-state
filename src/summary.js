@@ -23,6 +23,7 @@ function span(s, { table = false } = {}) {
   const longest = Math.max(0, ...(shown.match(/`+/g) || []).map((r) => r.length));
   const fence = '`'.repeat(longest + 1);
   const pad = /^[ `]|[ `]$/.test(shown) ? ' ' : '';
+  // Backslashes stay as they are: code spans are literal, and GFM unescapes only `\|` in table cells.
   const body = table ? shown.replace(/\|/g, '\\|') : shown;
   return `${fence}${pad}${body}${pad}${fence}${more}`;
 }

@@ -44,6 +44,12 @@ test('renderSummary escapes pipes in table cells and fences backticks', () => {
   assert.ok(md.includes('#### `s`\n\n```a ``b`` c```\n'));
 });
 
+test('renderSummary leaves backslashes alone, since GFM unescapes only pipes in cells', () => {
+  const md = renderSummary({ m: out({ k1: 'a\\|b', k2: 'end\\' }) }, { name: 'root' });
+  assert.ok(md.includes('| `k1` | `a\\\\|b` |'));
+  assert.ok(md.includes('| `k2` | `end\\` |'));
+});
+
 test('renderSummary keeps multi-line values from breaking the layout', () => {
   const md = renderSummary({ m: out({ k: 'one\ntwo' }), s: out('one\n```\ntwo') }, { name: 'root' });
   assert.ok(md.includes('| `k` | `"one\\ntwo"` |'));

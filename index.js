@@ -175,11 +175,16 @@ function writeSummary(outputs, { env = process.env, print = log, name } = {}) {
   try {
     const file = env.GITHUB_STEP_SUMMARY;
     if (!file || !Object.keys(outputs).length) return;
-    const used = fs.existsSync(file) ? fs.statSync(file).size : 0;
-    const sep = used ? '\n' : '';
-    const md = renderSummary(outputs, { name, limit: SUMMARY_LIMIT - used - sep.length });
-    if (!md) throw new Error('the step summary is full');
-    fs.appendFileSync(file, `${sep}${md}`);
+    const fd = fs.openSync(file, 'a');
+    try {
+      const used = fs.fstatSync(fd).size;
+      const sep = used ? '\n' : '';
+      const md = renderSummary(outputs, { name, limit: SUMMARY_LIMIT - used - sep.length });
+      if (!md) throw new Error('the step summary is full');
+      fs.writeSync(fd, `${sep}${md}`);
+    } finally {
+      fs.closeSync(fd);
+    }
   } catch (err) {
     print(`::warning::[actions-state] writing the step summary failed: ${err.message}`);
   }
