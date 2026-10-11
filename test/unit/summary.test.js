@@ -24,19 +24,19 @@ test('renderSummary renders nothing without outputs', () => {
 test('renderSummary renders scalars as one line, lists of scalars joined and other lists as JSON', () => {
   const md = renderSummary({ url: out('https://x'), count: out(3), on: out(true), zones: out(['a', 'b']), subnets: out([{ cidr: '10.0.0.0/24' }]) }, { name: 'root' });
   assert.equal(md, [
-    '### Terraform outputs (`root`)', '',
-    '#### `url`', '', '`https://x`', '',
-    '#### `count`', '', '`3`', '',
-    '#### `on`', '', '`true`', '',
-    '#### `zones`', '', '`a, b`', '',
-    '#### `subnets`', '', '`[{"cidr":"10.0.0.0/24"}]`', '', '',
+    '## Terraform outputs · `root`', '',
+    '### `url`', '', '`https://x`', '',
+    '### `count`', '', '`3`', '',
+    '### `on`', '', '`true`', '',
+    '### `zones`', '', '`a, b`', '',
+    '### `subnets`', '', '`[{"cidr":"10.0.0.0/24"}]`', '', '',
   ].join('\n'));
 });
 
 test('renderSummary renders a map of scalars as a table sorted by key', () => {
   const md = renderSummary({ settings: out({ ttl: 300, ssl: 'strict', ids: ['a', 'b'] }) }, { name: 'root' });
   assert.ok(md.includes([
-    '#### `settings`', '',
+    '### `settings`', '',
     '| Key | Value |', '| --- | --- |',
     '| `ids` | `a, b` |', '| `ssl` | `strict` |', '| `ttl` | `300` |', '', '',
   ].join('\n')));
@@ -45,9 +45,9 @@ test('renderSummary renders a map of scalars as a table sorted by key', () => {
 test('renderSummary nests maps: headings for maps of maps, <details> for maps of scalars', () => {
   const md = renderSummary({ zones: out(zones) }, { name: 'root' });
   assert.equal(md, [
-    '### Terraform outputs (`root`)', '',
-    '#### `zones`', '',
-    '##### `site`', '',
+    '## Terraform outputs · `root`', '',
+    '### `zones`', '',
+    '#### `site`', '',
     '| Key | Value |', '| --- | --- |',
     '| `account_id` | `acct-s` |', '| `zone_id` | `zone-s` |', '',
     '<details><summary><code>settings</code> (3)</summary>', '',
@@ -56,7 +56,7 @@ test('renderSummary nests maps: headings for maps of maps, <details> for maps of
     '| `security_header` | `{"strict_transport_security":{"enabled":false,"max_age":0}}` |',
     '| `ssl` | `full` |', '',
     '</details>', '',
-    '##### `tunnels`', '',
+    '#### `tunnels`', '',
     '| Key | Value |', '| --- | --- |',
     '| `account_id` | `acct-t` |', '| `zone_id` | `zone-t` |', '',
     '<details><summary><code>settings</code> (3)</summary>', '',
@@ -67,8 +67,13 @@ test('renderSummary nests maps: headings for maps of maps, <details> for maps of
 });
 
 test('renderSummary caps headings at level 6', () => {
-  const md = renderSummary({ deep: out({ a: { b: { c: { d: 'x' } } } }) }, { name: 'root' });
-  assert.ok(md.includes('\n##### `a`\n\n###### `b`\n\n<details><summary><code>c</code> (1)</summary>\n'));
+  const md = renderSummary({ deep: out({ a: { b: { c: { d: { e: { f: 'x' } } } } } }) }, { name: 'root' });
+  assert.ok(md.includes('\n#### `a`\n\n##### `b`\n\n###### `c`\n\n###### `d`\n\n<details><summary><code>e</code> (1)</summary>\n'));
+});
+
+test('renderSummary opens at h2 and names the package when given', () => {
+  const md = renderSummary({ url: out('https://x') }, { name: 'root', image: 'ghcr.io/o/r/actions-state:root' });
+  assert.ok(md.startsWith('## Terraform outputs · `root`\n\n<sub>actions-state · <code>ghcr.io/o/r/actions-state:root</code></sub>\n\n### `url`\n'));
 });
 
 test('renderSummary writes every value verbatim so the runner can mask it', () => {
@@ -81,8 +86,8 @@ test('renderSummary writes every value verbatim so the runner can mask it', () =
 test('renderSummary never renders a sensitive value', () => {
   const md = renderSummary({ api_token: out('s3cr3t-token', true), creds: out({ key: 's3cr3t-key' }, true) }, { name: 'root' });
   assert.ok(!md.includes('s3cr3t'));
-  assert.ok(md.includes('#### `api_token`\n\n_Sensitive; not shown._\n'));
-  assert.ok(md.includes('#### `creds`\n\n_Sensitive; not shown._\n'));
+  assert.ok(md.includes('### `api_token`\n\n_Sensitive; not shown._\n'));
+  assert.ok(md.includes('### `creds`\n\n_Sensitive; not shown._\n'));
 });
 
 test('renderSummary moves values with pipes or line breaks below the table, unchanged', () => {
@@ -102,22 +107,22 @@ test('renderSummary fences backticks', () => {
   const md = renderSummary({ m: out({ tick: '`', s: 'x `y`' }), s: out('a ``b`` c') }, { name: 'root' });
   assert.ok(md.includes('| `tick` | `` ` `` |'));
   assert.ok(md.includes('| `s` | `` x `y` `` |'));
-  assert.ok(md.includes('#### `s`\n\n```a ``b`` c```\n'));
+  assert.ok(md.includes('### `s`\n\n```a ``b`` c```\n'));
 });
 
 test('renderSummary fences multi-line scalars', () => {
-  assert.ok(renderSummary({ s: out('one\n```\ntwo') }, { name: 'root' }).includes('#### `s`\n\n````\none\n```\ntwo\n````\n'));
+  assert.ok(renderSummary({ s: out('one\n```\ntwo') }, { name: 'root' }).includes('### `s`\n\n````\none\n```\ntwo\n````\n'));
 });
 
 test('renderSummary marks empty strings', () => {
-  assert.ok(renderSummary({ e: out('') }, { name: 'root' }).includes('#### `e`\n\n_empty_\n'));
+  assert.ok(renderSummary({ e: out('') }, { name: 'root' }).includes('### `e`\n\n_empty_\n'));
 });
 
 test('renderSummary leaves out long values whole', () => {
   const md = renderSummary({ big: out('x'.repeat(5000)), m: out({ big: 'y'.repeat(3000) }) }, { name: 'root' });
   assert.ok(!md.includes('xxxx'));
   assert.ok(!md.includes('yyyy'));
-  assert.ok(md.includes('#### `big`\n\n_left out: 5000 characters; see the `json` output_\n'));
+  assert.ok(md.includes('### `big`\n\n_left out: 5000 characters; see the `json` output_\n'));
   assert.ok(md.includes('| `big` | _left out: 3000 characters; see the `json` output_ |'));
 });
 

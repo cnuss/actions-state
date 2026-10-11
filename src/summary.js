@@ -70,19 +70,23 @@ function mapLines(map, level) {
 }
 
 function section(k, { value, sensitive }) {
-  const lines = [`#### ${name(k)}`, ''];
+  const lines = [`### ${name(k)}`, ''];
   if (sensitive) lines.push('_Sensitive; not shown._', '');
-  else if (isMap(value)) lines.push(...mapLines(value, 5));
+  else if (isMap(value)) lines.push(...mapLines(value, 4));
   else lines.push(...standalone(text(value)));
   return lines;
 }
 
 // Lines are dropped from the end to fit `limit` bytes; open <details> are
 // closed and a notice is added.
-function renderSummary(outputs, { name: stateName, limit = LIMIT } = {}) {
+// Opens at h2: summaries of all steps share one page, so a lower level would
+// read as part of the previous step's section.
+function renderSummary(outputs, { name: stateName, image, limit = LIMIT } = {}) {
   const names = Object.keys(outputs);
   if (!names.length) return '';
-  const lines = [`### Terraform outputs (${name(stateName)})`, '', ...names.flatMap((n) => section(n, outputs[n]))];
+  const lines = [`## Terraform outputs · ${name(stateName)}`, ''];
+  if (image) lines.push(`<sub>actions-state · <code>${html(image)}</code></sub>`, '');
+  lines.push(...names.flatMap((n) => section(n, outputs[n])));
   const full = `${lines.join('\n')}\n`;
   if (Buffer.byteLength(full) <= limit) return full;
   const reserve = Buffer.byteLength(`\n${NOTICE}\n`);

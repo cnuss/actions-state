@@ -215,7 +215,9 @@ jobs:
   only in `json`.
 - A job that only reads state needs no Terraform: without `run`, the outputs
   are those of the state it loaded.
-- The outputs are also written to the step summary, one section per output.
+- The outputs are also written to the step summary, under an h2 heading that
+  names the state (the summaries of all steps share one page), with one
+  section per output.
   A map or object is a key and value table, sorted by key. A nested map of
   scalars is a collapsed table under its key, and a deeper one gets its own
   heading. A list of scalars is joined with commas; other lists are JSON.

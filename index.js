@@ -171,7 +171,7 @@ function emitOutputs(outputs, { env = process.env, print = log, includeSensitive
 }
 
 // A failed summary only warns: it must not fail the step.
-function writeSummary(outputs, { env = process.env, print = log, name } = {}) {
+function writeSummary(outputs, { env = process.env, print = log, name, image } = {}) {
   try {
     const file = env.GITHUB_STEP_SUMMARY;
     if (!file || !Object.keys(outputs).length) return;
@@ -179,7 +179,7 @@ function writeSummary(outputs, { env = process.env, print = log, name } = {}) {
     try {
       const used = fs.fstatSync(fd).size;
       const sep = used ? '\n' : '';
-      const md = renderSummary(outputs, { name, limit: SUMMARY_LIMIT - used - sep.length });
+      const md = renderSummary(outputs, { name, image, limit: SUMMARY_LIMIT - used - sep.length });
       if (!md) throw new Error('the step summary is full');
       fs.writeSync(fd, `${sep}${md}`);
     } finally {
@@ -262,7 +262,7 @@ async function main() {
   const outputs = await fetchOutputs(endpoint, password);
   const { entries, sensitive } = emitOutputs(outputs, { includeSensitive: cfg.includeSensitive });
   log(`[actions-state] set ${entries.length} outputs${sensitive.length ? `; sensitive: ${sensitive.join(', ')}` : ''}`);
-  if (cfg.summary) writeSummary(outputs, { name: cfg.name });
+  if (cfg.summary) writeSummary(outputs, { name: cfg.name, image: `ghcr.io/${cfg.image}:${cfg.slug}` });
 }
 
 // Every step runs even when an earlier one fails.

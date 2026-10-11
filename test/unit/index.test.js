@@ -225,7 +225,7 @@ test('writeSummary appends after what the step already wrote, without sensitive 
   writeSummary({ url: { value: 'https://x', sensitive: false }, pw: { value: 's3cr3t', sensitive: true } },
     { env: { GITHUB_STEP_SUMMARY: file }, print: (m) => printed.push(m), name: 'root' });
   const md = fs.readFileSync(file, 'utf8');
-  assert.ok(md.startsWith('from the script\n\n### Terraform outputs (`root`)\n'));
+  assert.ok(md.startsWith('from the script\n\n## Terraform outputs · `root`\n'));
   assert.ok(md.includes('`https://x`'));
   assert.ok(!md.includes('s3cr3t'));
   assert.deepEqual(printed, []);
