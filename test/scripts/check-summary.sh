@@ -18,8 +18,9 @@ cat "$md"
 if [ -n "${2:-}" ]; then test "$(head -n1 "$md")" = "$2"; fi
 grep -A2 -xF '#### `greeting`' "$md" | grep -xF '`hello`' >/dev/null
 grep -A2 -xF '#### `subnets`' "$md" | grep -xF '`[{"cidr":"10.0.0.0/24","zones":["a","b"]},{"cidr":"10.0.1.0/24","zones":["c"]}]`' >/dev/null
-grep -xF '| Key | Value |' "$md" >/dev/null
-grep -F '| `prod` | `{"region":"us-east-1",' "$md" >/dev/null
+grep -A6 -xF '##### `prod`' "$md" | grep -xF '| `region` | `us-east-1` |' >/dev/null
+grep -A8 -xF '##### `prod`' "$md" | grep -xF '<details><summary><code>tags</code> (2)</summary>' >/dev/null
+grep -xF '| `tier` | `web` |' "$md" >/dev/null
 grep -A2 -xF '#### `secret`' "$md" | grep -xF '_Sensitive; not shown._' >/dev/null
 if grep -qF '***' "$md"; then
   echo "::error::a masked value reached the step summary"

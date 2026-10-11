@@ -1,68 +1,108 @@
 'use strict';
 
-// Markdown for the step summary. Sensitive values are never rendered.
+// Markdown for the step summary. Sensitive values are never rendered. Every
+// other value is written as it is, so the runner can still mask it: a value
+// that cannot sit in a table cell unchanged goes below the table instead, and
+// a value too long to show is left out whole.
 
 const LIMIT = 1024 * 1024; // GitHub's cap on one step's summary, in bytes.
-const MAX_VALUE = 2048; // Characters shown per value.
+const MAX_VALUE = 2048; // Longer values are left out.
 const NOTICE = '_Truncated: GitHub limits a step summary to 1 MiB; every output is in the `json` output._';
 
 const isMap = (v) => v !== null && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).length > 0;
+const isScalar = (v) => v === null || typeof v !== 'object';
+const isLeaf = (map) => !Object.values(map).some(isMap);
 const multiline = (s) => /[\r\n]/.test(s);
-const text = (v) => (typeof v === 'string' ? v : JSON.stringify(v) ?? 'null');
-const oneLine = (v) => (typeof v === 'string' && multiline(v) ? JSON.stringify(v) : text(v));
+const byKey = ([a], [b]) => (a < b ? -1 : a > b ? 1 : 0);
+const html = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
-function clip(s) {
-  if (s.length <= MAX_VALUE) return { shown: s, more: '' };
-  return { shown: s.slice(0, MAX_VALUE), more: ` _(${s.length - MAX_VALUE} more characters)_` };
+// Strings as they are, lists of scalars joined with commas, anything else JSON.
+function text(v) {
+  if (typeof v === 'string') return v;
+  if (Array.isArray(v) && v.length && v.every(isScalar)) return v.map(text).join(', ');
+  return JSON.stringify(v) ?? 'null';
 }
 
 // A code span whose fence outlasts any backtick run inside it.
-function span(s, { table = false } = {}) {
+function span(s) {
   if (s === '') return '_empty_';
-  const { shown, more } = clip(s);
-  const longest = Math.max(0, ...(shown.match(/`+/g) || []).map((r) => r.length));
+  if (s.length > MAX_VALUE) return `_left out: ${s.length} characters; see the \`json\` output_`;
+  const longest = Math.max(0, ...(s.match(/`+/g) || []).map((r) => r.length));
   const fence = '`'.repeat(longest + 1);
-  const pad = /^[ `]|[ `]$/.test(shown) ? ' ' : '';
-  // Backslashes stay as they are: code spans are literal, and GFM unescapes only `\|` in table cells.
-  const body = table ? shown.replace(/\|/g, '\\|') : shown;
-  return `${fence}${pad}${body}${pad}${fence}${more}`;
+  const pad = /^[ `]|[ `]$/.test(s) ? ' ' : '';
+  return `${fence}${pad}${s}${pad}${fence}`;
 }
 
-function block(s) {
-  const { shown, more } = clip(s);
-  const longest = Math.max(0, ...(shown.match(/`+/g) || []).map((r) => r.length));
+function standalone(s) {
+  if (!multiline(s) || s.length > MAX_VALUE) return [span(s), ''];
+  const longest = Math.max(0, ...(s.match(/`+/g) || []).map((r) => r.length));
   const fence = '`'.repeat(Math.max(3, longest + 1));
-  return [fence, ...shown.split(/\r?\n|\r/), fence, ...(more ? [more.trim()] : [])];
+  return [fence, ...s.split(/\r\n|\r|\n/), fence, ''];
 }
 
-function section(name, { value, sensitive }) {
-  const lines = [`#### ${span(oneLine(name))}`, ''];
-  if (sensitive) lines.push('_Sensitive; not shown._');
-  else if (isMap(value)) {
-    lines.push('| Key | Value |', '| --- | --- |');
-    for (const [k, v] of Object.entries(value)) lines.push(`| ${span(oneLine(k), { table: true })} | ${span(oneLine(v), { table: true })} |`);
-  } else if (typeof value === 'string' && multiline(value)) lines.push(...block(value));
-  else lines.push(span(text(value)));
-  lines.push('');
+const name = (k) => span(multiline(k) ? JSON.stringify(k) : k);
+const fitsCell = (s) => s.length > MAX_VALUE || !/[|\r\n]/.test(s);
+// Keys are escaped; values never are, so values that need it go below the table.
+const keyCell = (k) => name(k).replace(/\|/g, '\\|');
+const heading = (level, k) => `${'#'.repeat(Math.min(level, 6))} ${name(k)}`;
+
+function details(k, note, body) {
+  return [`<details><summary><code>${html(multiline(k) ? JSON.stringify(k) : k)}</code>${note}</summary>`, '', ...body, '</details>', ''];
+}
+
+// Scalars as a table first, then each nested map: a map of scalars collapsed
+// under <details>, a deeper one under its own heading.
+function mapLines(map, level) {
+  const rows = [];
+  const rest = [];
+  for (const [k, v] of Object.entries(map).sort(byKey)) {
+    if (isMap(v)) {
+      rest.push(isLeaf(v)
+        ? details(k, ` (${Object.keys(v).length})`, mapLines(v, level + 1))
+        : [heading(level, k), '', ...mapLines(v, level + 1)]);
+      continue;
+    }
+    const s = text(v);
+    if (fitsCell(s)) rows.push(`| ${keyCell(k)} | ${span(s)} |`);
+    else rest.push(details(k, '', standalone(s)));
+  }
+  const lines = rows.length ? ['| Key | Value |', '| --- | --- |', ...rows, ''] : [];
+  for (const r of rest) lines.push(...r);
   return lines;
 }
 
-// Lines are dropped from the end to fit `limit` bytes, then a notice is added.
-function renderSummary(outputs, { name, limit = LIMIT } = {}) {
+function section(k, { value, sensitive }) {
+  const lines = [`#### ${name(k)}`, ''];
+  if (sensitive) lines.push('_Sensitive; not shown._', '');
+  else if (isMap(value)) lines.push(...mapLines(value, 5));
+  else lines.push(...standalone(text(value)));
+  return lines;
+}
+
+// Lines are dropped from the end to fit `limit` bytes; open <details> are
+// closed and a notice is added.
+function renderSummary(outputs, { name: stateName, limit = LIMIT } = {}) {
   const names = Object.keys(outputs);
   if (!names.length) return '';
-  const lines = [`### Terraform outputs (${span(oneLine(name))})`, '', ...names.flatMap((n) => section(n, outputs[n]))];
+  const lines = [`### Terraform outputs (${name(stateName)})`, '', ...names.flatMap((n) => section(n, outputs[n]))];
   const full = `${lines.join('\n')}\n`;
   if (Buffer.byteLength(full) <= limit) return full;
-  let budget = limit - Buffer.byteLength(`\n${NOTICE}\n`);
+  const reserve = Buffer.byteLength(`\n${NOTICE}\n`);
+  const close = Buffer.byteLength('\n</details>\n');
   const kept = [];
+  let size = 0;
+  let open = 0;
   for (const line of lines) {
-    budget -= Buffer.byteLength(line) + 1;
-    if (budget < 0) break;
+    const next = open + (line.startsWith('<details>') ? 1 : 0) - (line === '</details>' ? 1 : 0);
+    const cost = Buffer.byteLength(line) + 1;
+    if (size + cost + next * close + reserve > limit) break;
     kept.push(line);
+    size += cost;
+    open = next;
   }
   if (!kept.length) return '';
   while (kept.at(-1) === '') kept.pop();
+  for (; open > 0; open--) kept.push('', '</details>');
   return `${kept.join('\n')}\n\n${NOTICE}\n`;
 }
 
