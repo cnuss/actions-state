@@ -61,6 +61,21 @@ test('server errors are retryable and client errors are not', async () => {
   await assert.rejects(denied.resolve('root'), (err) => err.retryable === false);
 });
 
+test('rate-limited registry requests are retried, the token exchange included', async () => {
+  const calls = [];
+  const replies = { token: [429, 200], manifest: [429, 404] };
+  const request = async (method, url) => {
+    const kind = url.includes('/token?') ? 'token' : 'manifest';
+    calls.push(kind);
+    const status = replies[kind].shift();
+    const text = kind === 'token' && status === 200 ? '{"token":"t"}' : '';
+    return { status, headers: { 'retry-after': '0' }, text, buffer: Buffer.from(text) };
+  };
+  const store = createStore({ registry: 'http://r', image: 'o/r/actions-state', token: 'gh', request, sleep: async () => {} });
+  assert.equal(await store.resolve('root'), null);
+  assert.deepEqual(calls, ['token', 'token', 'manifest', 'manifest']);
+});
+
 test('serialOf is null without the annotation', () => {
   assert.equal(serialOf({ annotations: {} }), null);
 });

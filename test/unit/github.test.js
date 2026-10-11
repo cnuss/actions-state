@@ -51,3 +51,40 @@ test('findSelfJob matches the runner name among in-progress jobs, retrying while
   const env = { GITHUB_REPOSITORY: 'o/r', GITHUB_RUN_ID: '9', GITHUB_RUN_ATTEMPT: '1', RUNNER_NAME: 'GitHub Actions 1' };
   assert.deepEqual(await findSelfJob(rest, env, { sleep: async () => {} }), { id: 6, name: 'me', url: 'u6' });
 });
+
+const selfEnv = { GITHUB_REPOSITORY: 'o/r', GITHUB_RUN_ID: '9', GITHUB_RUN_ATTEMPT: '1', RUNNER_NAME: 'GitHub Actions 1' };
+const jobsPath = 'GET /repos/o/r/actions/runs/9/attempts/1/jobs?per_page=100&page=1';
+
+test('findSelfJob backs off for up to the timeout, then names the runner', async () => {
+  const slept = [];
+  const { rest, calls } = stubRest({ [jobsPath]: [200, { jobs: [] }] });
+  await assert.rejects(findSelfJob(rest, selfEnv, { sleep: async (ms) => { slept.push(ms); } }),
+    /could not find this job \(runner "GitHub Actions 1"\) in run 9 attempt 1 within 60 s: not listed yet/);
+  assert.deepEqual(slept, [1000, 2000, 4000, 8000, 8000, 8000, 8000, 8000, 8000]);
+  assert.equal(calls.length, 10);
+});
+
+test('findSelfJob retries server errors and rate limits but not other errors', async () => {
+  let n = 0;
+  const { rest } = stubRest({
+    [jobsPath]: () => {
+      n += 1;
+      if (n === 1) return [502, {}];
+      if (n === 2) return [429, {}];
+      return [200, { jobs: [{ id: 6, name: 'me', runner_name: 'GitHub Actions 1', status: 'in_progress', html_url: 'u6' }] }];
+    },
+  });
+  assert.equal((await findSelfJob(rest, selfEnv, { sleep: async () => {} })).id, 6);
+  const { rest: denied } = stubRest({ [jobsPath]: [403, { message: 'no' }] });
+  await assert.rejects(findSelfJob(denied, selfEnv, { sleep: async () => { throw new Error('slept'); } }), /listing this run's jobs: HTTP 403/);
+});
+
+test('findSelfJob takes a job not yet marked in progress but skips completed jobs on the same runner name', async () => {
+  const { rest } = stubRest({
+    [jobsPath]: [200, { jobs: [
+      { id: 4, name: 'earlier', runner_name: 'GitHub Actions 1', status: 'completed', html_url: 'u4' },
+      { id: 6, name: 'me', runner_name: 'GitHub Actions 1', status: 'queued', html_url: 'u6' },
+    ] }],
+  });
+  assert.equal((await findSelfJob(rest, selfEnv, { sleep: async () => {} })).id, 6);
+});
