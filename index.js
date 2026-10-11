@@ -16,6 +16,7 @@ const { createStore } = require('./src/core/store');
 const { repoInfo, packageVisibility, findSelfJob } = require('./src/core/github');
 const { getAdapter } = require('./src/adapters');
 const { toStepOutputs } = require('./src/outputs');
+const { renderSummary, LIMIT: SUMMARY_LIMIT } = require('./src/summary');
 
 const REGISTRY = 'https://ghcr.io';
 const START_TIMEOUT_MS = 10_000;
@@ -54,6 +55,7 @@ function resolveConfig(env) {
     replaceBackend: input(env, 'replace-backend') === 'true',
     allowAnyRef: input(env, 'allow-apply-from-any-ref') === 'true',
     includeSensitive: input(env, 'include-sensitive') !== 'false',
+    summary: input(env, 'summary') !== 'false',
     token: input(env, 'github-token'),
     runDir: path.join(env.RUNNER_TEMP || os.tmpdir(), 'actions-state'),
     apiUrl: env.GITHUB_API_URL || 'https://api.github.com',
@@ -168,6 +170,26 @@ function emitOutputs(outputs, { env = process.env, print = log, includeSensitive
   return result;
 }
 
+// A failed summary only warns: it must not fail the step.
+function writeSummary(outputs, { env = process.env, print = log, name } = {}) {
+  try {
+    const file = env.GITHUB_STEP_SUMMARY;
+    if (!file || !Object.keys(outputs).length) return;
+    const fd = fs.openSync(file, 'a');
+    try {
+      const used = fs.fstatSync(fd).size;
+      const sep = used ? '\n' : '';
+      const md = renderSummary(outputs, { name, limit: SUMMARY_LIMIT - used - sep.length });
+      if (!md) throw new Error('the step summary is full');
+      fs.writeSync(fd, `${sep}${md}`);
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch (err) {
+    print(`::warning::[actions-state] writing the step summary failed: ${err.message}`);
+  }
+}
+
 async function main() {
   saveState('post', 'true');
   const env = process.env;
@@ -237,8 +259,10 @@ async function main() {
     const code = await runScript(script, { cwd: cfg.workingDirectory, env: scriptEnv(env, password), scriptDir: cfg.runDir });
     if (code !== 0) throw new Error(`the run script exited with code ${code}`);
   }
-  const { entries, sensitive } = emitOutputs(await fetchOutputs(endpoint, password), { includeSensitive: cfg.includeSensitive });
+  const outputs = await fetchOutputs(endpoint, password);
+  const { entries, sensitive } = emitOutputs(outputs, { includeSensitive: cfg.includeSensitive });
   log(`[actions-state] set ${entries.length} outputs${sensitive.length ? `; sensitive: ${sensitive.join(', ')}` : ''}`);
+  if (cfg.summary) writeSummary(outputs, { name: cfg.name });
 }
 
 // Every step runs even when an earlier one fails.
@@ -290,7 +314,7 @@ async function post({ env = process.env, print = log } = {}) {
   });
 }
 
-module.exports = { resolveConfig, jobPassword, claimRunfile, waitForServer, preflightActions, preflightPackages, needsWritePreflight, post, emitOutputs, fetchOutputs, runScript, scriptEnv };
+module.exports = { resolveConfig, jobPassword, claimRunfile, waitForServer, preflightActions, preflightPackages, needsWritePreflight, post, emitOutputs, writeSummary, fetchOutputs, runScript, scriptEnv };
 
 if (require.main === module) {
   const run = process.env.STATE_post === 'true' ? post : main;

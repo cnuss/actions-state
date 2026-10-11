@@ -61,6 +61,7 @@ listed in `.git/info/exclude`.
 | `replace-backend` | `false` | Proceed even if the configuration declares a backend. |
 | `allow-apply-from-any-ref` | `false` | Let refs other than the default branch apply. |
 | `include-sensitive` | `true` | Set sensitive Terraform outputs as step outputs too; `false` leaves them out. See [Terraform outputs](#terraform-outputs). |
+| `summary` | `true` | Write the Terraform outputs to the step summary; `false` turns it off. See [Terraform outputs](#terraform-outputs). |
 | `run` | | Commands to run in `working-directory` once the backend is up. See [Running Terraform in the step](#running-terraform-in-the-step). |
 | `github-token` | `${{ github.token }}` | Needs `actions: write` and `packages: write`. |
 
@@ -214,6 +215,17 @@ jobs:
   only in `json`.
 - A job that only reads state needs no Terraform: without `run`, the outputs
   are those of the state it loaded.
+- The outputs are also written to the step summary, one section per output.
+  A map or object is a key and value table, sorted by key. A nested map of
+  scalars is a collapsed table under its key, and a deeper one gets its own
+  heading. A list of scalars is joined with commas; other lists are JSON.
+- Sensitive outputs appear in the summary by name only, whatever
+  `include-sensitive` says. Other values are written unchanged, so GitHub
+  still masks secrets in them: an entry with a `|` or a line break goes below
+  the table instead of being escaped, and a value over 2048 characters is
+  left out. A summary that would pass GitHub's 1 MiB limit is cut off at the
+  end. If the summary can't be written, the step warns and goes on.
+  `summary: false` turns it off.
 
 ## Moving existing state
 

@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
-const { resolveConfig, jobPassword, claimRunfile, waitForServer, preflightActions, preflightPackages, needsWritePreflight, post, emitOutputs, fetchOutputs, runScript, scriptEnv } = require('../../index');
+const { resolveConfig, jobPassword, claimRunfile, waitForServer, preflightActions, preflightPackages, needsWritePreflight, post, emitOutputs, writeSummary, fetchOutputs, runScript, scriptEnv } = require('../../index');
 
 const baseEnv = {
   GITHUB_WORKSPACE: '/w', GITHUB_REPOSITORY: 'CNuss/Thing', GITHUB_REF: 'refs/heads/main', RUNNER_TEMP: '/tmp/rt',
@@ -211,6 +211,47 @@ test('emitOutputs with no outputs sets empty json and sensitive', () => {
   const file = outputFile();
   emitOutputs({}, { env: { GITHUB_OUTPUT: file }, print: () => {} });
   assert.deepEqual(readCommandFile(file), { json: '{}', sensitive: '[]' });
+});
+
+test('resolveConfig turns the summary on by default', () => {
+  assert.equal(resolveConfig(baseEnv).summary, true);
+  assert.equal(resolveConfig({ ...baseEnv, INPUT_SUMMARY: 'false' }).summary, false);
+});
+
+test('writeSummary appends after what the step already wrote, without sensitive values', () => {
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'as-sum-')), 'summary.md');
+  fs.writeFileSync(file, 'from the script\n');
+  const printed = [];
+  writeSummary({ url: { value: 'https://x', sensitive: false }, pw: { value: 's3cr3t', sensitive: true } },
+    { env: { GITHUB_STEP_SUMMARY: file }, print: (m) => printed.push(m), name: 'root' });
+  const md = fs.readFileSync(file, 'utf8');
+  assert.ok(md.startsWith('from the script\n\n### Terraform outputs (`root`)\n'));
+  assert.ok(md.includes('`https://x`'));
+  assert.ok(!md.includes('s3cr3t'));
+  assert.deepEqual(printed, []);
+});
+
+test('writeSummary writes nothing without outputs', () => {
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'as-sum-')), 'summary.md');
+  writeSummary({}, { env: { GITHUB_STEP_SUMMARY: file }, print: () => {}, name: 'root' });
+  assert.equal(fs.existsSync(file), false);
+});
+
+test('writeSummary warns instead of throwing when it cannot write', () => {
+  const printed = [];
+  writeSummary({ url: { value: 'https://x', sensitive: false } },
+    { env: { GITHUB_STEP_SUMMARY: fs.mkdtempSync(path.join(os.tmpdir(), 'as-sum-')) }, print: (m) => printed.push(m), name: 'root' });
+  assert.equal(printed.length, 1);
+  assert.match(printed[0], /^::warning::\[actions-state\] writing the step summary failed: /);
+});
+
+test('writeSummary warns when the step summary is already full', () => {
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'as-sum-')), 'summary.md');
+  fs.writeFileSync(file, 'x'.repeat(1024 * 1024));
+  const printed = [];
+  writeSummary({ url: { value: 'https://x', sensitive: false } }, { env: { GITHUB_STEP_SUMMARY: file }, print: (m) => printed.push(m), name: 'root' });
+  assert.deepEqual(printed, ['::warning::[actions-state] writing the step summary failed: the step summary is full']);
+  assert.equal(fs.statSync(file).size, 1024 * 1024);
 });
 
 test('scriptEnv passes the step env with the backend password and without action inputs', () => {
