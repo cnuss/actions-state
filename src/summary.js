@@ -1,8 +1,8 @@
 'use strict';
 
 // Markdown for the step summary. Sensitive values are never rendered. Every
-// other value is written as it is, so the runner can still mask it: a value
-// that cannot sit in a table cell unchanged goes below the table instead, and
+// other value is written as it is, so the runner can still mask it: an entry
+// that cannot sit in a table row unchanged goes below the table instead, and
 // a value too long to show is left out whole.
 
 const LIMIT = 1024 * 1024; // GitHub's cap on one step's summary, in bytes.
@@ -42,8 +42,6 @@ function standalone(s) {
 
 const name = (k) => span(multiline(k) ? JSON.stringify(k) : k);
 const fitsCell = (s) => s.length > MAX_VALUE || !/[|\r\n]/.test(s);
-// Keys are escaped; values never are, so values that need it go below the table.
-const keyCell = (k) => name(k).replace(/\|/g, '\\|');
 const heading = (level, k) => `${'#'.repeat(Math.min(level, 6))} ${name(k)}`;
 
 function details(k, note, body) {
@@ -63,7 +61,7 @@ function mapLines(map, level) {
       continue;
     }
     const s = text(v);
-    if (fitsCell(s)) rows.push(`| ${keyCell(k)} | ${span(s)} |`);
+    if (!/[|\r\n]/.test(k) && fitsCell(s)) rows.push(`| ${name(k)} | ${span(s)} |`);
     else rest.push(details(k, '', standalone(s)));
   }
   const lines = rows.length ? ['| Key | Value |', '| --- | --- |', ...rows, ''] : [];

@@ -92,9 +92,9 @@ test('renderSummary moves values with pipes or line breaks below the table, unch
   assert.ok(md.includes('<details><summary><code>pipe</code></summary>\n\n`x | y`\n\n</details>\n'));
 });
 
-test('renderSummary escapes pipes in keys and HTML in summaries', () => {
+test('renderSummary moves keys with pipes below the table and escapes HTML in summaries', () => {
   const md = renderSummary({ m: out({ 'a|b': 'v', n: { '<k>&': { z: 1 } } }) }, { name: 'root' });
-  assert.ok(md.includes('| `a\\|b` | `v` |'));
+  assert.ok(md.includes('<details><summary><code>a|b</code></summary>\n\n`v`\n\n</details>\n'));
   assert.ok(md.includes('<summary><code>&lt;k&gt;&amp;</code> (1)</summary>'));
 });
 

@@ -221,7 +221,7 @@ jobs:
   heading. A list of scalars is joined with commas; other lists are JSON.
 - Sensitive outputs appear in the summary by name only, whatever
   `include-sensitive` says. Other values are written unchanged, so GitHub
-  still masks secrets in them: a value with a `|` or a line break goes below
+  still masks secrets in them: an entry with a `|` or a line break goes below
   the table instead of being escaped, and a value over 2048 characters is
   left out. A summary that would pass GitHub's 1 MiB limit is cut off at the
   end. If the summary can't be written, the step warns and goes on.
