@@ -61,6 +61,7 @@ listed in `.git/info/exclude`.
 | `replace-backend` | `false` | Proceed even if the configuration declares a backend. |
 | `allow-apply-from-any-ref` | `false` | Let refs other than the default branch apply. |
 | `include-sensitive` | `true` | Set sensitive Terraform outputs as step outputs too; `false` leaves them out. See [Terraform outputs](#terraform-outputs). |
+| `summary` | `true` | Write the Terraform outputs to the step summary; `false` turns it off. See [Terraform outputs](#terraform-outputs). |
 | `run` | | Commands to run in `working-directory` once the backend is up. See [Running Terraform in the step](#running-terraform-in-the-step). |
 | `github-token` | `${{ github.token }}` | Needs `actions: write` and `packages: write`. |
 
@@ -214,6 +215,12 @@ jobs:
   only in `json`.
 - A job that only reads state needs no Terraform: without `run`, the outputs
   are those of the state it loaded.
+- The outputs are also written to the step summary, one section per output:
+  a map or object as a key and value table, anything else as one line, with
+  nested values as JSON. Sensitive outputs are listed by name only, whatever
+  `include-sensitive` says. Long values are shortened, and a summary that
+  would pass GitHub's 1 MiB limit is cut off at the end. A summary that cannot
+  be written is a warning, not a failure. `summary: false` turns it off.
 
 ## Moving existing state
 

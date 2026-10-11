@@ -96,6 +96,7 @@ jobs:
             ${{ matrix.tool }} state list | grep -qx null_resource.smoke
             ${{ matrix.tool }} plan -detailed-exitcode -input=false
             echo "from_script=yes" >> "$GITHUB_OUTPUT"
+            echo "from the script" >> "$GITHUB_STEP_SUMMARY"
       - name: Outputs of the state after the run script are step outputs, and nested ones work with fromJSON
         env:
           SECRET: ${{ secrets.SMOKE_SECRET }}
@@ -122,6 +123,8 @@ jobs:
           test "$SECOND_ZONE" = b
           test "$FROM_JSON_REGION" = us-west-2
           test "$FROM_JSON_GREETING" = hello
+      - name: The step summary follows what the run script wrote and leaves out the sensitive value
+        run: test/scripts/check-summary.sh "$PREFIX-smoke-${{ matrix.tool }}" "from the script"
 
   smoke-reload:
     needs: smoke
@@ -156,6 +159,8 @@ jobs:
           test/scripts/check-outputs.sh "$(jq -c 'del(.secret)' <<<"$JSON")" "$SECRET"
           test "$STATE_PROD_REGION" = us-east-1
           test "$JOB_PROD_REPLICAS" = 3
+      - name: The step summary leaves out the sensitive value even when it is a step output
+        run: test/scripts/check-summary.sh "$PREFIX-smoke-${{ matrix.tool }}"
       - name: Destroy empties the state
         working-directory: test/fixtures/null
         env:

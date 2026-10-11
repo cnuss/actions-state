@@ -33,6 +33,10 @@ inputs:
     description: 'Set sensitive Terraform outputs as step outputs too, masked in logs. GitHub drops job outputs that contain masked values. false leaves them out.'
     required: false
     default: 'true'
+  summary:
+    description: 'Write the Terraform outputs to the step summary. Sensitive values are never written. false turns it off.'
+    required: false
+    default: 'true'
   run:
     description: 'Commands to run in working-directory once the backend is up, like a bash run step (bash -e -o pipefail) with this step''s env. The state server stays up for later steps.'
     required: false
