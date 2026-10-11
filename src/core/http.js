@@ -66,6 +66,44 @@ function retryAfterMs(headers, fallbackMs) {
   return Math.min(Math.max(Number.isFinite(ms) ? ms : fallbackMs, 0), 60_000);
 }
 
+const RATE_LIMIT_TRIES = 4;
+const RATE_LIMIT_MAX_WAIT_MS = 60_000;
+const realSleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// 429, or GitHub's 403 that carries a Retry-After or an exhausted quota.
+function isRateLimited(res) {
+  const headers = res.headers || {};
+  return res.status === 429
+    || (res.status === 403 && (headers['retry-after'] !== undefined || headers['x-ratelimit-remaining'] === '0'));
+}
+
+// Retry-After, else the quota reset time, else `fallbackMs`.
+function rateLimitWaitMs(headers = {}, fallbackMs, now = Date.now()) {
+  const after = headers['retry-after'];
+  if (after !== undefined) {
+    const secs = Number(after);
+    const ms = Number.isFinite(secs) ? secs * 1000 : Date.parse(after) - now;
+    return Number.isFinite(ms) ? Math.max(ms, 0) : fallbackMs;
+  }
+  const reset = Number(headers['x-ratelimit-reset']);
+  if (headers['x-ratelimit-remaining'] === '0' && Number.isFinite(reset)) return Math.max(reset * 1000 - now, 0);
+  return fallbackMs;
+}
+
+// Sends again after a rate-limited response, waiting as long as the server
+// asks. A wait over a minute is not worth holding a job for: the response is
+// returned as it is.
+async function retryRateLimited(send, { sleep = realSleep, tries = RATE_LIMIT_TRIES } = {}) {
+  for (let attempt = 1; ; attempt += 1) {
+    const res = await send();
+    if (!isRateLimited(res) || attempt >= tries) return res;
+    const wait = rateLimitWaitMs(res.headers, 1000 * 2 ** (attempt - 1));
+    if (wait > RATE_LIMIT_MAX_WAIT_MS) return res;
+    debug(`rate limited (HTTP ${res.status}); retrying in ${Math.ceil(wait / 1000)} s`);
+    await sleep(wait);
+  }
+}
+
 function cacheClient({ token, resultsUrl }) {
   if (!token || !resultsUrl) {
     throw new Error('ACTIONS_RUNTIME_TOKEN / ACTIONS_RESULTS_URL not present — is this running as an action in GitHub Actions?');
@@ -80,7 +118,7 @@ function cacheClient({ token, resultsUrl }) {
   };
 }
 
-function restClient({ token, apiUrl = 'https://api.github.com' }) {
+function restClient({ token, apiUrl = 'https://api.github.com', sleep = realSleep }) {
   const api = apiUrl.replace(/\/$/, '');
   return async (method, path, body) => {
     const headers = {
@@ -90,7 +128,8 @@ function restClient({ token, apiUrl = 'https://api.github.com' }) {
       'User-Agent': 'actions-state',
     };
     if (body !== undefined) headers['Content-Type'] = 'application/json';
-    const res = await request(method, `${api}${path}`, headers, body === undefined ? null : JSON.stringify(body));
+    const data = body === undefined ? null : JSON.stringify(body);
+    const res = await retryRateLimited(() => request(method, `${api}${path}`, headers, data), { sleep });
     return { status: res.status, headers: res.headers, json: parseJson(res.text), text: res.text };
   };
 }
@@ -109,5 +148,6 @@ const blobs = {
 
 module.exports = {
   DEFAULT_TIMEOUT_MS, BLOB_TIMEOUT_MS,
-  request, parseJson, isThrottled, retryAfterMs, redactUrl, setDebug, cacheClient, restClient, blobs,
+  request, parseJson, isThrottled, retryAfterMs, isRateLimited, rateLimitWaitMs, retryRateLimited, redactUrl, setDebug,
+  cacheClient, restClient, blobs,
 };

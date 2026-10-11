@@ -66,6 +66,57 @@ test('restClient sends GitHub API headers and parses JSON', async () => {
   assert.deepEqual(r.json, { id: 1 });
 });
 
+test('restClient retries a rate-limited request after the wait GitHub asks for', async () => {
+  const statuses = [[429, { 'retry-after': '2' }], [403, { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': '0' }], [200, {}]];
+  const seen = [];
+  const srv = await serve((req, res, body) => {
+    seen.push(body);
+    const [status, headers] = statuses.shift();
+    res.writeHead(status, headers);
+    res.end(status === 200 ? '{"ok":true}' : '{}');
+  });
+  const slept = [];
+  const rest = h.restClient({ token: 'gh', apiUrl: srv.url, sleep: async (ms) => { slept.push(ms); } });
+  const r = await rest('POST', '/x', { a: 1 });
+  await srv.close();
+  assert.equal(r.status, 200);
+  assert.deepEqual(slept, [2000, 0]);
+  assert.deepEqual(seen, ['{"a":1}', '{"a":1}', '{"a":1}']);
+});
+
+test('isRateLimited covers 429 and GitHub rate-limit 403s, not permission 403s', () => {
+  assert.equal(h.isRateLimited({ status: 429, headers: {} }), true);
+  assert.equal(h.isRateLimited({ status: 403, headers: { 'retry-after': '60' } }), true);
+  assert.equal(h.isRateLimited({ status: 403, headers: { 'x-ratelimit-remaining': '0' } }), true);
+  assert.equal(h.isRateLimited({ status: 403, headers: { 'x-ratelimit-remaining': '12' } }), false);
+  assert.equal(h.isRateLimited({ status: 503, headers: {} }), false);
+});
+
+test('rateLimitWaitMs uses Retry-After, then the quota reset, then the fallback', () => {
+  const now = Date.parse('2026-10-11T12:00:00Z');
+  assert.equal(h.rateLimitWaitMs({ 'retry-after': '3' }, 1000, now), 3000);
+  assert.equal(h.rateLimitWaitMs({ 'retry-after': 'Sun, 11 Oct 2026 12:00:07 GMT' }, 1000, now), 7000);
+  assert.equal(h.rateLimitWaitMs({ 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': String(now / 1000 + 30) }, 1000, now), 30000);
+  assert.equal(h.rateLimitWaitMs({}, 1000, now), 1000);
+});
+
+test('retryRateLimited backs off without headers and returns the last response after its tries', async () => {
+  const slept = [];
+  let sent = 0;
+  const r = await h.retryRateLimited(async () => { sent += 1; return { status: 429, headers: {} }; }, { sleep: async (ms) => { slept.push(ms); } });
+  assert.equal(r.status, 429);
+  assert.equal(sent, 4);
+  assert.deepEqual(slept, [1000, 2000, 4000]);
+});
+
+test('retryRateLimited does not wait more than a minute', async () => {
+  let sent = 0;
+  const r = await h.retryRateLimited(async () => { sent += 1; return { status: 429, headers: { 'retry-after': '3600' } }; },
+    { sleep: async () => { throw new Error('slept'); } });
+  assert.equal(r.status, 429);
+  assert.equal(sent, 1);
+});
+
 test('retryAfterMs honours seconds, falls back, and caps at a minute', () => {
   assert.equal(h.retryAfterMs({ 'retry-after': '5' }, 3000), 5000);
   assert.equal(h.retryAfterMs({}, 3000), 3000);

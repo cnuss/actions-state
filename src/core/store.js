@@ -60,7 +60,7 @@ function storeError(message, res) {
   return err;
 }
 
-function createStore({ registry = 'https://ghcr.io', image, token, request = http.request }) {
+function createStore({ registry = 'https://ghcr.io', image, token, request = http.request, sleep }) {
   const base = registry.replace(/\/$/, '');
   const service = new URL(base).host;
   let bearer = null;
@@ -69,9 +69,9 @@ function createStore({ registry = 'https://ghcr.io', image, token, request = htt
     const scope = `repository:${image}:pull,push`;
     let res;
     try {
-      res = await request('GET', `${base}/token?scope=${encodeURIComponent(scope)}&service=${encodeURIComponent(service)}`, {
+      res = await http.retryRateLimited(() => request('GET', `${base}/token?scope=${encodeURIComponent(scope)}&service=${encodeURIComponent(service)}`, {
         Authorization: `Basic ${Buffer.from(`actions-state:${token}`).toString('base64')}`,
-      });
+      }), { sleep });
     } catch (err) { throw storeError(`registry token: ${err.message}`, null); }
     if (res.status !== 200) throw storeError(`registry token: HTTP ${res.status}: ${res.text}`, res);
     const t = http.parseJson(res.text).token;
@@ -86,9 +86,11 @@ function createStore({ registry = 'https://ghcr.io', image, token, request = htt
       try { return await request(method, url, { Authorization: `Bearer ${bearer}`, ...headers }, body, opts); }
       catch (err) { throw storeError(`${method} ${path}: ${err.message}`, null); }
     };
-    let res = await once();
-    if (res.status === 401) { bearer = null; res = await once(); }
-    return res;
+    return http.retryRateLimited(async () => {
+      let res = await once();
+      if (res.status === 401) { bearer = null; res = await once(); }
+      return res;
+    }, { sleep });
   }
 
   async function resolve(tag) {
