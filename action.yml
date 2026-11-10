@@ -13,6 +13,10 @@ inputs:
     description: 'State name. Defaults to working-directory relative to the workspace ("root" for the workspace itself).'
     required: false
     default: ''
+  repository:
+    description: 'Another repository whose state to read, as owner/repo spelled as on GitHub. Only outputs are set: no backend, no lock, no run. The job''s token needs read access to that repository''s state package.'
+    required: false
+    default: ''
   passphrase:
     description: 'Encrypts state before it leaves the runner. Required when the repository or its state package is public. Pass it from a secret.'
     required: false

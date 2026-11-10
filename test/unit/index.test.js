@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
-const { resolveConfig, jobPassword, claimRunfile, waitForServer, preflightActions, preflightPackages, needsWritePreflight, post, emitOutputs, writeSummary, fetchOutputs, runScript, scriptEnv } = require('../../index');
+const { resolveConfig, jobPassword, claimRunfile, waitForServer, preflightActions, preflightPackages, needsWritePreflight, post, emitOutputs, writeSummary, fetchOutputs, runScript, scriptEnv, readStateOutputs, readOnlyRefusals } = require('../../index');
 
 const baseEnv = {
   GITHUB_WORKSPACE: '/w', GITHUB_REPOSITORY: 'CNuss/Thing', GITHUB_REF: 'refs/heads/main', RUNNER_TEMP: '/tmp/rt',
@@ -273,4 +273,57 @@ test('runScript stops at the first failing command, pipelines included', async (
   assert.equal(await runScript('false | true\ntouch after-pipe', { cwd: dir, env: process.env, scriptDir: dir }), 1);
   assert.equal(fs.existsSync(path.join(dir, 'after-pipe')), false);
   assert.equal(await runScript('exit 7', { cwd: dir, env: process.env, scriptDir: dir }), 7);
+});
+
+test('resolveConfig: repository names another repo whose state is read, not served', () => {
+  const cfg = resolveConfig({ ...baseEnv, INPUT_REPOSITORY: 'CNuss/Infra', INPUT_NAME: 'terraform' });
+  assert.equal(cfg.source, 'CNuss/Infra');
+  assert.equal(cfg.readOnly, true);
+  assert.equal(cfg.image, 'cnuss/infra/actions-state');
+  assert.equal(cfg.aad, 'CNuss/Infra:terraform');
+});
+
+test('resolveConfig: repository naming this repo, in any case, serves as usual', () => {
+  for (const env of [baseEnv, { ...baseEnv, INPUT_REPOSITORY: 'cnuss/thing' }]) {
+    const cfg = resolveConfig(env);
+    assert.equal(cfg.readOnly, false);
+    assert.equal(cfg.image, 'cnuss/thing/actions-state');
+    assert.equal(cfg.aad, 'CNuss/Thing:root');
+  }
+});
+
+test('readStateOutputs reads the newest version of another repo\'s state, decrypting it', async (t) => {
+  const { startFakeRegistry } = require('../fakes/registry');
+  const { createStore, annotationsFor } = require('../../src/core/store');
+  const box = require('../../src/core/crypto');
+  const reg = await startFakeRegistry();
+  t.after(() => reg.close());
+  const image = 'o/infra/actions-state';
+  const writer = createStore({ registry: reg.url, image, token: 'gh' });
+  const state = (url) => Buffer.from(JSON.stringify({ version: 4, serial: 2, outputs: { url: { value: url, type: 'string' }, key: { value: 'k', sensitive: true } } }));
+  const put = (name, bytes, tag = 'terraform') => writer.push({
+    bytes, mediaType: 'application/vnd.cnuss.actions-state.tfstate.v1',
+    annotations: annotationsFor({ name, serial: 2, source: 'https://github.com/o/infra' }), tags: [tag],
+  });
+  const reader = createStore({ registry: reg.url, image, token: 'gh', access: 'pull' });
+  const read = (opts = {}) => readStateOutputs({ store: reader, slug: 'terraform', name: 'terraform', passphrase: '', aad: 'o/infra:terraform', ...opts });
+
+  await assert.rejects(read(), /no state "terraform" at .*o\/infra\/actions-state:terraform/);
+
+  await put('terraform', state('https://a'));
+  assert.deepEqual(await read(), { url: { value: 'https://a', sensitive: false }, key: { value: 'k', sensitive: true } });
+  assert.ok(reg.scopes.includes('repository:o/infra/actions-state:pull'));
+
+  await put('terraform', box.encrypt(state('https://b'), 'pw', 'o/infra:terraform'));
+  await assert.rejects(read(), /encrypted: set the passphrase input/);
+  assert.equal((await read({ passphrase: 'pw' })).url.value, 'https://b');
+  await assert.rejects(read({ passphrase: 'pw', aad: 'o/other:terraform' }), /decryption failed/);
+
+  await put('other', state('https://c'));
+  await assert.rejects(read(), /holds state "other", not "terraform"/);
+});
+
+test('readOnlyRefusals: run needs the state served from this repository', () => {
+  assert.throws(() => readOnlyRefusals({ source: 'o/infra', run: 'terraform plan' }), /`run` needs the state served from this repository; o\/infra's state is only read/);
+  assert.doesNotThrow(() => readOnlyRefusals({ source: 'o/infra', run: '' }));
 });

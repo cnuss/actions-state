@@ -10,9 +10,9 @@ const path = require('path');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
 const { deriveName, tagSlug, imageName } = require('./src/core/names');
-const { aadFor } = require('./src/core/crypto');
+const { aadFor, isEncrypted, decrypt } = require('./src/core/crypto');
 const { request, restClient } = require('./src/core/http');
-const { createStore } = require('./src/core/store');
+const { createStore, PREFIX } = require('./src/core/store');
 const { repoInfo, packageVisibility, findSelfJob } = require('./src/core/github');
 const { getAdapter } = require('./src/adapters');
 const { toStepOutputs } = require('./src/outputs');
@@ -42,13 +42,20 @@ function resolveConfig(env) {
   const dirInput = input(env, 'working-directory') || '.';
   const name = input(env, 'name') || deriveName(dirInput, workspace);
   const lockTimeout = input(env, 'lock-timeout') || '600';
+  const given = input(env, 'repository');
+  const readOnly = Boolean(given) && given.toLowerCase() !== String(env.GITHUB_REPOSITORY).toLowerCase();
+  // Encryption binds the name the writer saw as GITHUB_REPOSITORY.
+  const source = readOnly ? given : env.GITHUB_REPOSITORY;
   if (!/^\d+$/.test(lockTimeout)) throw new Error(`lock-timeout must be a whole number of seconds, got "${lockTimeout}"`);
   return {
     workingDirectory: path.resolve(workspace, dirInput),
     name,
     slug: tagSlug(name),
     repository: env.GITHUB_REPOSITORY,
-    image: imageName(env.GITHUB_REPOSITORY),
+    source,
+    readOnly,
+    image: imageName(source),
+    aad: aadFor(source, name),
     ref: env.GITHUB_REF,
     passphrase: input(env, 'passphrase'),
     lockTimeoutMs: Number(lockTimeout) * 1000,
@@ -152,6 +159,37 @@ function runScript(script, { cwd, env, scriptDir }) {
   }).finally(() => fs.rmSync(file, { force: true }));
 }
 
+// Another repository's state is read, never served: no backend, no lock.
+function readOnlyRefusals({ source, run }) {
+  if (run) throw new Error(`\`run\` needs the state served from this repository; ${source}'s state is only read`);
+}
+
+async function readStateOutputs({ store, slug, name, passphrase, aad }) {
+  const resolved = await store.resolve(slug);
+  if (!resolved) throw new Error(`no state "${name}" at ghcr.io/${store.image}:${slug}, or this job may not read it: grant this repository read access to the package`);
+  const owner = resolved.manifest?.annotations?.[`${PREFIX}.name`];
+  if (owner != null && owner !== name) throw new Error(`tag "${slug}" holds state "${owner}", not "${name}"`);
+  let { bytes } = await store.pull(resolved);
+  if (isEncrypted(bytes)) {
+    if (!passphrase) throw new Error(`state "${name}" is encrypted: set the passphrase input`);
+    bytes = decrypt(bytes, passphrase, aad);
+  }
+  return getAdapter('terraform').stateOutputs(bytes);
+}
+
+async function mainReadOnly(cfg) {
+  readOnlyRefusals({ source: cfg.source, run: input(process.env, 'run') });
+  const store = createStore({ registry: REGISTRY, image: cfg.image, token: cfg.token, access: 'pull' });
+  const outputs = await readStateOutputs({ store, slug: cfg.slug, name: cfg.name, passphrase: cfg.passphrase, aad: cfg.aad });
+  setOutput('state-name', cfg.name);
+  setOutput('image', `ghcr.io/${cfg.image}`);
+  setOutput('address', '');
+  log(`[actions-state] read "${cfg.name}" from ghcr.io/${cfg.image}:${cfg.slug} (read only)`);
+  const { entries, sensitive } = emitOutputs(outputs, { includeSensitive: cfg.includeSensitive });
+  log(`[actions-state] set ${entries.length} outputs${sensitive.length ? `; sensitive: ${sensitive.join(', ')}` : ''}`);
+  if (cfg.summary) writeSummary(outputs, { name: cfg.name, image: `ghcr.io/${cfg.image}:${cfg.slug}` });
+}
+
 async function fetchOutputs(endpoint, password) {
   const r = await request('GET', `${endpoint}/state`, basicAuth(password), null, { timeoutMs: 60_000 });
   if (r.status === 404) return {};
@@ -195,6 +233,7 @@ async function main() {
   const env = process.env;
   const cfg = resolveConfig(env);
   if (!cfg.token) throw new Error('input `github-token` is required');
+  if (cfg.readOnly) return mainReadOnly(cfg);
   const adapter = getAdapter('terraform');
   adapter.check(cfg.workingDirectory, { replaceBackend: cfg.replaceBackend });
 
@@ -229,7 +268,7 @@ async function main() {
     runfile, apiUrl: cfg.apiUrl, registry: REGISTRY, repository: cfg.repository, ref: cfg.ref,
     slug: cfg.slug, name: cfg.name, image: cfg.image, adapter: adapter.name,
     identity: { run_id: env.GITHUB_RUN_ID, run_attempt: env.GITHUB_RUN_ATTEMPT, job_id: job.id, job_name: job.name, job_url: job.url, ref: cfg.ref },
-    isDefaultRef, allowAnyRef: cfg.allowAnyRef, lockTimeoutMs: cfg.lockTimeoutMs, aad: aadFor(cfg.repository, cfg.name),
+    isDefaultRef, allowAnyRef: cfg.allowAnyRef, lockTimeoutMs: cfg.lockTimeoutMs, aad: cfg.aad,
     meta: { runId: env.GITHUB_RUN_ID, sha: env.GITHUB_SHA, ref: cfg.ref, defaultRef, source: `${cfg.serverUrl}/${cfg.repository}` },
   };
   const out = fs.openSync(logFile, 'a');
@@ -314,7 +353,7 @@ async function post({ env = process.env, print = log } = {}) {
   });
 }
 
-module.exports = { resolveConfig, jobPassword, claimRunfile, waitForServer, preflightActions, preflightPackages, needsWritePreflight, post, emitOutputs, writeSummary, fetchOutputs, runScript, scriptEnv };
+module.exports = { resolveConfig, jobPassword, claimRunfile, waitForServer, preflightActions, preflightPackages, needsWritePreflight, post, emitOutputs, writeSummary, fetchOutputs, runScript, scriptEnv, readStateOutputs, readOnlyRefusals };
 
 if (require.main === module) {
   const run = process.env.STATE_post === 'true' ? post : main;

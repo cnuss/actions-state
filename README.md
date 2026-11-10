@@ -56,6 +56,7 @@ listed in `.git/info/exclude`.
 |---|---|---|
 | `working-directory` | `.` | Root module directory. |
 | `name` | derived | State name. Defaults to `working-directory` relative to the workspace (`root` for the workspace itself). |
+| `repository` | | Another repository whose state to read. See [Outputs from another repository](#outputs-from-another-repository). |
 | `passphrase` | | Encrypts state. Required for public repositories or packages. |
 | `lock-timeout` | `600` | Seconds to wait for a lock held by another job. `0` fails at once. |
 | `replace-backend` | `false` | Proceed even if the configuration declares a backend. |
@@ -142,6 +143,33 @@ Use the action once per directory; each gets its own state:
           working-directory: infra/zone
           passphrase: ${{ secrets.STATE_PASSPHRASE }}
 ```
+
+## Outputs from another repository
+
+With `repository`, the step reads the newest version of that repository's
+state and sets its [Terraform outputs](#terraform-outputs), so an app's
+deploy can use what its infrastructure repository applied:
+
+```yaml
+      - id: infra
+        uses: cnuss/actions-state@v1
+        with:
+          repository: my-org/infra
+          name: terraform
+      - run: echo "$BUCKET"
+        env:
+          BUCKET: ${{ steps.infra.outputs.bucket }}
+```
+
+- Nothing is served: no backend override, no lock, and `run` is refused.
+  `working-directory` need not exist; give `name` as the other repository
+  saves it (its `working-directory` there, by default).
+- The job's token needs read access to `ghcr.io/<repository>/actions-state`.
+  For `github.token`, add this repository under the package's settings,
+  Manage Actions access, with the Read role.
+- An encrypted state needs the same `passphrase`, and `repository` spelled
+  as on GitHub: the encryption binds the writer's repository name.
+- A missing tag, or one the token may not read, fails the step.
 
 ## Secrets as variables
 
