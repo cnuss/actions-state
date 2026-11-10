@@ -60,13 +60,14 @@ function storeError(message, res) {
   return err;
 }
 
-function createStore({ registry = 'https://ghcr.io', image, token, request = http.request, sleep }) {
+// access is the registry scope asked for: 'pull,push', or 'pull' to only read.
+function createStore({ registry = 'https://ghcr.io', image, token, access = 'pull,push', request = http.request, sleep }) {
   const base = registry.replace(/\/$/, '');
   const service = new URL(base).host;
   let bearer = null;
 
   async function exchange() {
-    const scope = `repository:${image}:pull,push`;
+    const scope = `repository:${image}:${access}`;
     let res;
     try {
       res = await http.retryRateLimited(() => request('GET', `${base}/token?scope=${encodeURIComponent(scope)}&service=${encodeURIComponent(service)}`, {

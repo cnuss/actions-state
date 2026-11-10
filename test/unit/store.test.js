@@ -123,3 +123,11 @@ test('canPush throws on statuses that say nothing about permissions', async () =
   const store = createStore({ registry: 'http://r', image: 'o/r/actions-state', token: 'gh', request });
   await assert.rejects(store.canPush(), /test upload: HTTP 500/);
 });
+
+test('access pull asks the registry for pull alone', async (t) => {
+  const reg = await startFakeRegistry();
+  t.after(() => reg.close());
+  const store = createStore({ registry: reg.url, image: 'o/r/actions-state', token: 'gh', access: 'pull' });
+  assert.equal(await store.resolve('root'), null);
+  assert.deepEqual(reg.scopes, ['repository:o/r/actions-state:pull']);
+});
