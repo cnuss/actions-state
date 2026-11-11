@@ -157,14 +157,16 @@ function sensitiveValues(plan) {
 }
 
 const html = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+// As tfplan2md writes a value in a table cell: backslash and pipe escaped, & as an entity.
+const tableCell = (s) => s.replace(/[\\|]/g, '\\$&').replace(/&/g, '&amp;');
 
-// Replaces each secret of MIN_MASK characters or more, as written and as
-// Markdown tables and HTML escape it.
+// Replaces each secret of MIN_MASK characters or more, as written, as HTML
+// escapes it and as a tfplan2md table cell writes it.
 function redact(text, secrets) {
   const variants = new Set();
   for (const s of secrets) {
     if (!s || s.length < MIN_MASK) continue;
-    variants.add(s).add(html(s)).add(s.replace(/\|/g, '\\|'));
+    variants.add(s).add(html(s)).add(tableCell(s));
   }
   let out = text;
   for (const v of [...variants].sort((a, b) => b.length - a.length)) out = out.split(v).join('***');

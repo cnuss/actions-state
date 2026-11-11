@@ -582,6 +582,33 @@ jobs:
             grep -xF "$heading" "$RUNNER_TEMP/comment.md"
             grep -F "/actions/runs/$GITHUB_RUN_ID/" "$RUNNER_TEMP/comment.md"
           fi
+      - name: A later, different plan, which post puts in the same comment
+        working-directory: ${{ env.FIXTURE }}
+        run: ${{ matrix.tool }} plan -input=false -var value=three
+
+  plan-comment-verify:
+    needs: plan-comment
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    strategy:
+      fail-fast: false
+      matrix:
+        tool: [terraform, tofu]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Each state still has one comment, edited to the later plan
+        run: |
+          node test/scripts/plan-comment.js "it-plan-${{ matrix.tool }}" | tee "$RUNNER_TEMP/comment.md"
+          grep -F "/actions/runs/$GITHUB_RUN_ID/" "$RUNNER_TEMP/comment.md"
+          grep -F '`three`' "$RUNNER_TEMP/comment.md"
+          if grep -F '`two`' "$RUNNER_TEMP/comment.md"; then
+            echo "::error::the comment still shows the first plan"
+            exit 1
+          fi
 
   plan-in-post:
     runs-on: ubuntu-latest

@@ -87,6 +87,8 @@ test('sensitiveValues collects every value the plan marks sensitive, not short o
 test('redact replaces secrets as written, HTML-escaped and table-escaped, longest first', () => {
   assert.equal(redact('a hunter22 b hunter2222', ['hunter22', 'hunter2222']), 'a *** b ***');
   assert.equal(redact('<td>p&amp;ss&lt;1</td> | ab\\|cdef |', ['p&ss<1', 'ab|cdef']), '<td>***</td> | *** |');
+  // A row as tfplan2md 1.48.0 writes it.
+  assert.equal(redact('| input.a | `p\\|pe\\\\back<lt>&amp;amp` | `x` |', ['p|pe\\back<lt>&amp']), '| input.a | `***` | `x` |');
   assert.equal(redact('keep t short', ['', null, 't', 'short']), 'keep t short');
 });
 
