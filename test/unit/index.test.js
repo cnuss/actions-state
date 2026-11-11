@@ -554,3 +554,23 @@ test('post reports a plan saved after main, before it stops the server, then rem
   assert.match(fs.readFileSync(s.summary, 'utf8'), /^<!-- actions-state:plan:work -->\n/);
   assert.equal(fs.existsSync(path.join(s.workingDirectory, 'actions_state.tfplan')), false);
 });
+
+test('post.js, after a main step that was skipped, only cleans up: it serves no state and runs nothing', () => {
+  const { spawnSync } = require('node:child_process');
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), 'as-skipped-'));
+  const result = spawnSync(process.execPath, [path.join(__dirname, '..', '..', 'post.js')], {
+    env: {
+      PATH: process.env.PATH,
+      GITHUB_REPOSITORY: 'o/r',
+      GITHUB_REF: 'refs/heads/main',
+      RUNNER_TEMP: runDir,
+      'INPUT_GITHUB-TOKEN': 'gh',
+      'INPUT_RUN': 'echo the run script ran',
+    },
+    encoding: 'utf8',
+  });
+  {
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.doesNotMatch(result.stdout, /serving|the run script ran/);
+  }
+});
