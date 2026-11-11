@@ -174,7 +174,7 @@ async function pre({ env = process.env, print = log, rest: givenRest, lockFor } 
 
   // A second use of one state name in a job is refused in main; it must not wait here on the first's lock.
   fs.mkdirSync(cfg.runDir, { recursive: true });
-  try { fs.writeFileSync(path.join(cfg.runDir, `${cfg.slug}.pre`), '', { flag: 'wx' }); } catch (err) {
+  try { fs.writeFileSync(path.join(cfg.runDir, `${cfg.slug}.pre`), '', { flag: 'wx', mode: 0o600 }); } catch (err) {
     if (err.code === 'EEXIST') return null;
     throw err;
   }
