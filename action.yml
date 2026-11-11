@@ -46,7 +46,7 @@ inputs:
     required: false
     default: ''
   github-token:
-    description: 'Token for the cache, packages and REST calls. Needs actions: write and packages: write.'
+    description: 'Token for the cache, packages and REST calls. Needs actions: write and packages: write; with pull-requests: write it also comments the plan on pull requests.'
     required: false
     default: ${{ github.token }}
 
@@ -61,6 +61,10 @@ outputs:
     description: 'Terraform root module outputs as a JSON object: of the state after run when given, else of the state as loaded. Each output is also a step output of its own name.'
   sensitive:
     description: 'Names of sensitive Terraform outputs, as a JSON array.'
+  plan-changes:
+    description: 'true or false: whether the plan saved by `run` changes anything. Unset when `run` saves no plan.'
+  plan-comment-url:
+    description: 'The pull request comment the plan saved by `run` was posted to, or empty.'
 
 runs:
   using: 'node24'

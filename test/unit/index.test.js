@@ -6,7 +6,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
-const { pre, resolveConfig, jobPassword, claimRunfile, waitForServer, preflightActions, preflightPackages, needsWritePreflight, post, emitOutputs, writeSummary, fetchOutputs, runScript, scriptEnv, readStateOutputs, readOnlyRefusals } = require('../../index');
+const { planZip } = require('../fakes/zip');
+const { reportPlan, appendSummary, pre, resolveConfig, jobPassword, claimRunfile, waitForServer, preflightActions, preflightPackages, needsWritePreflight, post, emitOutputs, writeSummary, fetchOutputs, runScript, scriptEnv, readStateOutputs, readOnlyRefusals } = require('../../index');
 
 const baseEnv = {
   GITHUB_WORKSPACE: '/w', GITHUB_REPOSITORY: 'CNuss/Thing', GITHUB_REF: 'refs/heads/main', RUNNER_TEMP: '/tmp/rt',
@@ -259,6 +260,10 @@ test('scriptEnv passes the step env with the backend password and without action
   assert.deepEqual(env, { PATH: '/bin', CLOUDFLARE_API_TOKEN: 'cf', TF_HTTP_PASSWORD: 'pw1' });
 });
 
+test('scriptEnv adds the extra variables', () => {
+  assert.deepEqual(scriptEnv({ PATH: '/bin' }, 'pw1', { TF_CLI_ARGS_plan: '-out=x' }), { PATH: '/bin', TF_HTTP_PASSWORD: 'pw1', TF_CLI_ARGS_plan: '-out=x' });
+});
+
 test('runScript runs bash in the directory with the env and returns the exit code', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'as-run-'));
   const code = await runScript('pwd > out\necho "$GREETING" >> out', { cwd: dir, env: { ...process.env, GREETING: 'hi' }, scriptDir: dir });
@@ -396,4 +401,156 @@ test('post releases the job\'s lock, entry and holder record', async () => {
   await new Promise((r) => api.close(r));
   assert.deepEqual(deleted, ['DELETE /repos/o/r/actions/caches/21', 'DELETE /repos/o/r/actions/caches/22']);
   assert.match(printed.join('\n'), /released the job's lock \(job-1-1-7\)/);
+});
+
+test('appendSummary warns when what it renders does not fit', () => {
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'as-sum-')), 'summary.md');
+  fs.writeFileSync(file, 'x'.repeat(1024 * 1024 - 3));
+  const printed = [];
+  appendSummary(() => 'too long', { env: { GITHUB_STEP_SUMMARY: file }, print: (m) => printed.push(m) });
+  assert.deepEqual(printed, ['::warning::[actions-state] writing the step summary failed: the step summary is full']);
+});
+
+// A working directory with a saved plan, fake plan tools and a fake REST API.
+function planSetup({ plan, event = null, report = '# Report\n\n## Summary\n\nrendered\n', installFails = false, routes = {} } = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'as-report-'));
+  const workingDirectory = path.join(dir, 'work');
+  const runDir = path.join(dir, 'run');
+  fs.mkdirSync(workingDirectory);
+  fs.mkdirSync(runDir);
+  fs.writeFileSync(path.join(workingDirectory, 'actions_state.tfplan'), planZip(41));
+  const summary = path.join(dir, 'summary.md');
+  const eventFile = path.join(dir, 'event.json');
+  if (event) fs.writeFileSync(eventFile, JSON.stringify(event));
+  const calls = [];
+  const tool = { file: '/bin/terraform', kind: 'terraform' };
+  const tools = {
+    showPlan: async (file, opts) => { calls.push(['showPlan', path.basename(file), opts.cwd, opts.env.TF_HTTP_PASSWORD, opts.env.INPUT_PASSPHRASE]); return { tool, plan }; },
+    showText: async () => { calls.push(['showText']); return 'Terraform will perform the following actions:\n  ~ resource "x" "a" {}\n'; },
+    installTfplan2md: async ({ cacheDir }) => { calls.push(['install', cacheDir]); if (installFails) throw new Error('no build'); return '/bin/tfplan2md'; },
+    tfplan2md: async (bin, p, opts) => { calls.push(['tfplan2md', opts.template || 'default']); return report; },
+  };
+  const restCalls = [];
+  const rest = async (method, p, body) => {
+    restCalls.push({ call: `${method} ${p}`, body });
+    const route = routes[`${method} ${p}`];
+    const [status, json] = route || [404, {}];
+    return { status, json, text: JSON.stringify(json) };
+  };
+  const env = {
+    GITHUB_STEP_SUMMARY: summary, GITHUB_SHA: 'mergesha0000', GITHUB_RUN_ID: '9', RUNNER_TOOL_CACHE: path.join(dir, 'cache'),
+    INPUT_PASSPHRASE: 'pp-secret', ...(event ? { GITHUB_EVENT_NAME: 'pull_request', GITHUB_EVENT_PATH: eventFile } : { GITHUB_EVENT_NAME: 'push' }),
+  };
+  const cfg = {
+    workingDirectory, runDir, name: 'infra', repository: 'o/r', serverUrl: 'https://github.com', summary: true, token: 'ghs_tokenvalue', passphrase: 'pp-secret',
+  };
+  return { cfg, env, tools, rest, calls, restCalls, summary, workingDirectory };
+}
+
+const changedPlan = {
+  resource_changes: [{ address: 'x.a', change: { actions: ['update'], before: { pw: 'old-secret' }, before_sensitive: { pw: true }, after: {}, after_sensitive: {} } }],
+};
+const pr = { pull_request: { number: 5, head: { sha: 'headsha1234567' } } };
+
+test('reportPlan renders the plan to the step summary and comments it on the pull request', async () => {
+  const s = planSetup({
+    plan: changedPlan, event: pr, report: '# Report\n\nrendered old-secret and ghs_tokenvalue\n',
+    routes: {
+      'GET /repos/o/r/issues/5/comments?per_page=100&page=1': [200, []],
+      'POST /repos/o/r/issues/5/comments': [201, { html_url: 'https://github.com/o/r/pull/5#issuecomment-1' }],
+    },
+  });
+  const printed = [];
+  const r = await reportPlan({ cfg: s.cfg, env: s.env, password: 'pw', jobUrl: 'https://github.com/o/r/actions/runs/9/job/3', rest: s.rest, print: (m) => printed.push(m), tools: s.tools });
+  assert.equal(r.changes, true);
+  assert.equal(r.url, 'https://github.com/o/r/pull/5#issuecomment-1');
+  assert.match(r.digest, /^[0-9a-f]{64}$/);
+  assert.deepEqual(s.calls, [
+    ['showPlan', 'actions_state.tfplan', s.workingDirectory, 'pw', undefined],
+    ['install', s.env.RUNNER_TOOL_CACHE],
+    ['tfplan2md', 'default'],
+  ]);
+  const body = s.restCalls.at(-1).body.body;
+  assert.ok(body.startsWith('<!-- actions-state:plan:infra -->\n## Terraform plan · `infra`\n\n**Plan: 0 to add, 1 to change, 0 to destroy.**\n'));
+  assert.match(body, /\nrendered \*\*\* and \*\*\*\n/);
+  assert.match(body, /state serial 41 · commit \[`headsha`\]\(https:\/\/github\.com\/o\/r\/commit\/headsha1234567\) · \[workflow run\]\(https:\/\/github\.com\/o\/r\/actions\/runs\/9\/job\/3\)/);
+  assert.equal(fs.readFileSync(s.summary, 'utf8'), body);
+  assert.match(printed.join('\n'), /created the plan comment on #5: https:\/\/github\.com\/o\/r\/pull\/5#issuecomment-1/);
+  assert.equal(await reportPlan({ cfg: s.cfg, env: s.env, password: 'pw', skipDigest: r.digest, rest: s.rest, print: () => {}, tools: s.tools }), null);
+});
+
+test('reportPlan shows the plan as text when tfplan2md cannot run, and only logs a token that may not comment', async () => {
+  const s = planSetup({
+    plan: changedPlan, event: pr, installFails: true,
+    routes: { 'GET /repos/o/r/issues/5/comments?per_page=100&page=1': [200, []], 'POST /repos/o/r/issues/5/comments': [403, {}] },
+  });
+  const printed = [];
+  const r = await reportPlan({ cfg: s.cfg, env: s.env, rest: s.rest, print: (m) => printed.push(m), tools: s.tools });
+  assert.deepEqual(r && { changes: r.changes, url: r.url }, { changes: true, url: '' });
+  assert.deepEqual(s.calls.map((c) => c[0]), ['showPlan', 'install', 'showText']);
+  assert.match(fs.readFileSync(s.summary, 'utf8'), /```diff\nTerraform will perform the following actions:\n!   resource "x" "a" \{\}\n```/);
+  const out = printed.join('\n');
+  assert.match(out, /tfplan2md is not available, so the plan is shown as text: no build/);
+  assert.match(out, /not commenting on #5: the token may not write pull request comments \(permissions: pull-requests: write\)/);
+  assert.doesNotMatch(out, /::warning::/);
+});
+
+test('reportPlan adds no comment for a plan without changes but updates an earlier one', async () => {
+  const noChanges = { resource_changes: [{ address: 'x.a', change: { actions: ['no-op'] } }] };
+  const none = planSetup({ plan: noChanges, event: pr, routes: { 'GET /repos/o/r/issues/5/comments?per_page=100&page=1': [200, []] } });
+  const printed = [];
+  const r = await reportPlan({ cfg: none.cfg, env: none.env, rest: none.rest, print: (m) => printed.push(m), tools: none.tools });
+  assert.equal(r.changes, false);
+  assert.deepEqual(none.calls.map((c) => c[0]), ['showPlan']);
+  assert.deepEqual(none.restCalls.map((c) => c.call), ['GET /repos/o/r/issues/5/comments?per_page=100&page=1']);
+  assert.match(printed.join('\n'), /no changes, so no comment on #5/);
+
+  const earlier = planSetup({
+    plan: noChanges, event: pr,
+    routes: {
+      'GET /repos/o/r/issues/5/comments?per_page=100&page=1': [200, [{ id: 8, body: '<!-- actions-state:plan:infra -->\nold plan' }]],
+      'PATCH /repos/o/r/issues/comments/8': [200, { html_url: 'u8' }],
+    },
+  });
+  const updated = await reportPlan({ cfg: earlier.cfg, env: earlier.env, rest: earlier.rest, print: () => {}, tools: earlier.tools });
+  assert.equal(updated.url, 'u8');
+  assert.match(earlier.restCalls.at(-1).body.body, /\*\*No changes\.\*\*/);
+});
+
+test('reportPlan outside a pull request writes only the step summary, and nothing without a new plan', async () => {
+  const s = planSetup({ plan: changedPlan, routes: {} });
+  s.cfg.summary = true;
+  const r = await reportPlan({ cfg: s.cfg, env: s.env, rest: s.rest, print: () => {}, tools: s.tools });
+  assert.equal(r.url, '');
+  assert.deepEqual(s.restCalls, []);
+  assert.match(fs.readFileSync(s.summary, 'utf8'), /commit \[`mergesh`\]\(https:\/\/github\.com\/o\/r\/commit\/mergesha0000\) · \[workflow run\]\(https:\/\/github\.com\/o\/r\/actions\/runs\/9\)/);
+  assert.equal(await reportPlan({ cfg: s.cfg, env: s.env, since: Date.now() + 60_000, rest: s.rest, print: () => {}, tools: s.tools }), null);
+  s.cfg.summary = false;
+  fs.rmSync(s.summary);
+  await reportPlan({ cfg: s.cfg, env: s.env, rest: s.rest, print: () => {}, tools: s.tools });
+  assert.equal(fs.existsSync(s.summary), false);
+});
+
+test('post reports a plan saved after main, before it stops the server, then removes it', async () => {
+  const s = planSetup({ plan: changedPlan });
+  const order = [];
+  const server = http.createServer((req, res) => { order.push(`server ${req.url}`); res.end('ok'); });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const runfile = path.join(s.cfg.runDir, 'infra.json');
+  fs.writeFileSync(runfile, JSON.stringify({ port: server.address().port }));
+  fs.writeFileSync(path.join(s.cfg.runDir, 'password'), 'pw');
+  const tools = { ...s.tools, showPlan: async (...a) => { order.push('showPlan'); return s.tools.showPlan(...a); } };
+  await post({
+    env: {
+      ...s.env, STATE_runfile: runfile, STATE_working_directory: s.workingDirectory, STATE_plan_since: '0',
+      GITHUB_WORKSPACE: path.dirname(s.workingDirectory), 'INPUT_WORKING-DIRECTORY': 'work', GITHUB_REPOSITORY: 'o/r',
+      'INPUT_GITHUB-TOKEN': 'gh', GITHUB_API_URL: 'http://127.0.0.1:1', RUNNER_TEMP: path.dirname(s.cfg.runDir),
+    },
+    print: () => {},
+    tools,
+  });
+  await new Promise((r) => server.close(r));
+  assert.deepEqual(order, ['showPlan', 'server /shutdown']);
+  assert.match(fs.readFileSync(s.summary, 'utf8'), /^<!-- actions-state:plan:work -->\n/);
+  assert.equal(fs.existsSync(path.join(s.workingDirectory, 'actions_state.tfplan')), false);
 });

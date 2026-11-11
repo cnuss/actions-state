@@ -51,4 +51,40 @@ async function findSelfJob(rest, env, { timeoutMs = 60_000, sleep = (ms) => new 
   }
 }
 
-module.exports = { repoInfo, packageVisibility, findSelfJob };
+// The pull request this run is for: its number and head commit.
+function pullRequestOf(env, readFile = (f) => require('fs').readFileSync(f, 'utf8')) {
+  if (!['pull_request', 'pull_request_target'].includes(env.GITHUB_EVENT_NAME) || !env.GITHUB_EVENT_PATH) return null;
+  let event;
+  try { event = JSON.parse(readFile(env.GITHUB_EVENT_PATH)); } catch { return null; }
+  const pr = event && event.pull_request;
+  if (!pr || !Number.isInteger(pr.number)) return null;
+  return { number: pr.number, headSha: (pr.head && pr.head.sha) || '' };
+}
+
+// Edits the pull request's comment that starts with `marker`, or adds one.
+// Without `create`, a missing comment is left missing. A token that may not
+// write comments (no pull-requests: write, or a fork's) is `forbidden`.
+async function upsertComment(rest, { repository, number, marker, body, create = true }) {
+  let found = null;
+  for (let page = 1; !found; page += 1) {
+    const r = await rest('GET', `/repos/${repository}/issues/${number}/comments?per_page=100&page=${page}`);
+    if (r.status === 403) return { result: 'forbidden' };
+    if (r.status !== 200) throw new Error(`listing comments on #${number}: HTTP ${r.status}: ${r.text}`);
+    const comments = Array.isArray(r.json) ? r.json : [];
+    found = comments.find((c) => typeof c.body === 'string' && c.body.startsWith(marker)) || null;
+    if (comments.length < 100) break;
+  }
+  if (found) {
+    const r = await rest('PATCH', `/repos/${repository}/issues/comments/${found.id}`, { body });
+    if (r.status === 200) return { result: 'updated', url: r.json.html_url || found.html_url };
+    if (r.status === 403) return { result: 'forbidden' };
+    throw new Error(`updating comment ${found.id}: HTTP ${r.status}: ${r.text}`);
+  }
+  if (!create) return { result: 'skipped' };
+  const r = await rest('POST', `/repos/${repository}/issues/${number}/comments`, { body });
+  if (r.status === 201) return { result: 'created', url: r.json.html_url };
+  if (r.status === 403) return { result: 'forbidden' };
+  throw new Error(`commenting on #${number}: HTTP ${r.status}: ${r.text}`);
+}
+
+module.exports = { repoInfo, packageVisibility, findSelfJob, pullRequestOf, upsertComment };

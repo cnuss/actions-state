@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { repoInfo, packageVisibility, findSelfJob } = require('../../src/core/github');
+const { repoInfo, packageVisibility, findSelfJob, pullRequestOf, upsertComment } = require('../../src/core/github');
 
 function stubRest(routes) {
   const calls = [];
@@ -87,4 +87,55 @@ test('findSelfJob takes a job not yet marked in progress but skips completed job
     ] }],
   });
   assert.equal((await findSelfJob(rest, selfEnv, { sleep: async () => {} })).id, 6);
+});
+
+test('pullRequestOf reads the number and head commit on pull request events only', () => {
+  const event = JSON.stringify({ pull_request: { number: 7, head: { sha: 'abc' } } });
+  const read = () => event;
+  assert.deepEqual(pullRequestOf({ GITHUB_EVENT_NAME: 'pull_request', GITHUB_EVENT_PATH: '/e' }, read), { number: 7, headSha: 'abc' });
+  assert.deepEqual(pullRequestOf({ GITHUB_EVENT_NAME: 'pull_request_target', GITHUB_EVENT_PATH: '/e' }, read), { number: 7, headSha: 'abc' });
+  assert.equal(pullRequestOf({ GITHUB_EVENT_NAME: 'push', GITHUB_EVENT_PATH: '/e' }, read), null);
+  assert.equal(pullRequestOf({ GITHUB_EVENT_NAME: 'pull_request', GITHUB_EVENT_PATH: '/e' }, () => '{'), null);
+  assert.equal(pullRequestOf({ GITHUB_EVENT_NAME: 'pull_request' }, read), null);
+});
+
+function commentRest(routes) {
+  const calls = [];
+  const rest = async (method, path, body) => {
+    calls.push({ call: `${method} ${path}`, body });
+    const route = routes[`${method} ${path}`];
+    const [status, json] = route ? (typeof route === 'function' ? route() : route) : [404, {}];
+    return { status, json, text: JSON.stringify(json) };
+  };
+  return { rest, calls };
+}
+
+const M = '<!-- actions-state:plan:root -->';
+const list = (page) => `GET /repos/o/r/issues/5/comments?per_page=100&page=${page}`;
+
+test('upsertComment updates the comment that starts with the marker, looking past the first page', async () => {
+  const filler = Array.from({ length: 100 }, (_, i) => ({ id: i, body: `x ${M}` }));
+  const { rest, calls } = commentRest({
+    [list(1)]: [200, filler],
+    [list(2)]: [200, [{ id: 500, body: `${M}\nold`, html_url: 'u500' }]],
+    'PATCH /repos/o/r/issues/comments/500': [200, { html_url: 'u500' }],
+  });
+  const r = await upsertComment(rest, { repository: 'o/r', number: 5, marker: M, body: `${M}\nnew` });
+  assert.deepEqual(r, { result: 'updated', url: 'u500' });
+  assert.deepEqual(calls.at(-1), { call: 'PATCH /repos/o/r/issues/comments/500', body: { body: `${M}\nnew` } });
+});
+
+test('upsertComment adds a comment when none has the marker, unless create is false', async () => {
+  const routes = { [list(1)]: [200, [{ id: 1, body: 'hello' }]], 'POST /repos/o/r/issues/5/comments': [201, { html_url: 'u2' }] };
+  assert.deepEqual(await upsertComment(commentRest(routes).rest, { repository: 'o/r', number: 5, marker: M, body: M }), { result: 'created', url: 'u2' });
+  const { rest, calls } = commentRest(routes);
+  assert.deepEqual(await upsertComment(rest, { repository: 'o/r', number: 5, marker: M, body: M, create: false }), { result: 'skipped' });
+  assert.deepEqual(calls.map((c) => c.call), [list(1)]);
+});
+
+test('upsertComment reports a token that may not comment as forbidden and throws on other errors', async () => {
+  const forbidden = { [list(1)]: [200, []], 'POST /repos/o/r/issues/5/comments': [403, { message: 'Resource not accessible by integration' }] };
+  assert.deepEqual(await upsertComment(commentRest(forbidden).rest, { repository: 'o/r', number: 5, marker: M, body: M }), { result: 'forbidden' });
+  const broken = { [list(1)]: [500, { message: 'boom' }] };
+  await assert.rejects(upsertComment(commentRest(broken).rest, { repository: 'o/r', number: 5, marker: M, body: M }), /listing comments on #5: HTTP 500/);
 });
