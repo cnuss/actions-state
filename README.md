@@ -302,7 +302,8 @@ jobs:
   is rendered when the job ends, without outputs.
 - The comment has the counts (`Plan: 1 to add, 0 to change, 1 to destroy`)
   and a report from [tfplan2md](https://github.com/oocx/tfplan2md): a summary
-  table and a collapsed section per resource. When tfplan2md can't run, the
+  table and a collapsed section per resource. Changes made outside Terraform
+  are shown only for resources the plan changes. When tfplan2md can't run, the
   plan is shown as `show` prints it, in a `diff` block. A footer names the
   state serial and the commit the plan was made against, and links the run.
 - Each state has one comment, updated on every push. A plan with no changes

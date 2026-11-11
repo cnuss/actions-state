@@ -105,7 +105,7 @@ test('tfplan2md renders for GitHub from a private file it then removes', async (
     'cat "$file"',
   ].join('\n'));
   const out = await tools.tfplan2md(bin, { a: 1 }, { tmpDir: dir });
-  assert.equal(out, 'args: --render-target github --hide-metadata --hide-unchanged-outputs\n600\n{"a":1}');
+  assert.equal(out, 'args: --render-target github --hide-metadata --hide-unchanged-outputs --drift relevant\n600\n{"a":1}');
   const summary = await tools.tfplan2md(bin, { a: 1 }, { tmpDir: dir, template: 'summary' });
   assert.match(summary, /^args: .* --template summary\n/);
   assert.deepEqual(fs.readdirSync(dir), ['tfplan2md']);

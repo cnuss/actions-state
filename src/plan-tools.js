@@ -136,12 +136,13 @@ async function untar(archive, dir) {
 }
 
 // Markdown for a `show -json` document. The JSON holds secrets, so its file
-// is private to the user and removed at once.
+// is private to the user and removed at once. Drift is shown only for
+// resources the plan changes, as Terraform's own plan output does.
 async function tfplan2md(bin, plan, { tmpDir = os.tmpdir(), template } = {}) {
   const file = path.join(tmpDir, `plan-${crypto.randomBytes(8).toString('hex')}.json`);
   fs.writeFileSync(file, JSON.stringify(plan), { mode: 0o600 });
   try {
-    const args = ['--render-target', 'github', '--hide-metadata', '--hide-unchanged-outputs'];
+    const args = ['--render-target', 'github', '--hide-metadata', '--hide-unchanged-outputs', '--drift', 'relevant'];
     if (template) args.push('--template', template);
     const r = await run(bin, [...args, file], { env: { PATH: process.env.PATH || '', HOME: os.tmpdir() } });
     if (r.code !== 0) throw new Error(`tfplan2md exited with ${r.code}: ${(r.stderr || '').trim()}`);
