@@ -311,8 +311,9 @@ jobs:
 - Without `pull-requests: write`, or on a pull request from a fork, whose
   token is read-only, there is no comment and the step goes on. The step
   summary has the plan either way; `summary: false` leaves it out.
-- A plan too long for a comment (65,536 characters) is cut down to the
-  summary table, then to the text, with a link to the run.
+- The step summary gets the whole tfplan2md report, up to GitHub's 1 MiB
+  limit. A plan too long for a comment (65,536 characters) is cut down
+  there to the summary table, then to the text, with a link to the run.
 - The plan is read with `terraform show -json`, or `tofu show -json` when
   terraform can't read it. The setup actions' wrappers are skipped for the
   `terraform-bin` and `tofu-bin` beside them.

@@ -474,9 +474,25 @@ test('reportPlan renders the plan to the step summary and comments it on the pul
   assert.ok(body.startsWith('<!-- actions-state:plan:infra -->\n## Terraform plan · `infra`\n\n**Plan: 0 to add, 1 to change, 0 to destroy.**\n'));
   assert.match(body, /\nrendered \*\*\* and \*\*\*\n/);
   assert.match(body, /state serial 41 · commit \[`headsha`\]\(https:\/\/github\.com\/o\/r\/commit\/headsha1234567\) · \[workflow run\]\(https:\/\/github\.com\/o\/r\/actions\/runs\/9\/job\/3\)/);
-  assert.equal(fs.readFileSync(s.summary, 'utf8'), body);
+  assert.equal(fs.readFileSync(s.summary, 'utf8'), body.replace('<!-- actions-state:plan:infra -->\n', ''));
   assert.match(printed.join('\n'), /created the plan comment on #5: https:\/\/github\.com\/o\/r\/pull\/5#issuecomment-1/);
   assert.equal(await reportPlan({ cfg: s.cfg, env: s.env, password: 'pw', skipDigest: r.digest, rest: s.rest, print: () => {}, tools: s.tools }), null);
+});
+
+test('reportPlan puts the whole report in the step summary when the comment needs the summary template', async () => {
+  const big = `# Report\n\n## Summary\n\n${'row\n'.repeat(20_000)}`;
+  const s = planSetup({
+    plan: changedPlan, event: pr, report: big,
+    routes: { 'GET /repos/o/r/issues/5/comments?per_page=100&page=1': [200, []], 'POST /repos/o/r/issues/5/comments': [201, { html_url: 'u' }] },
+  });
+  s.tools.tfplan2md = async (bin, p, opts) => { s.calls.push(['tfplan2md', opts.template || 'default']); return opts.template ? '# S\n\n## Summary\n\ncounts\n' : big; };
+  await reportPlan({ cfg: s.cfg, env: s.env, rest: s.rest, print: () => {}, tools: s.tools });
+  assert.deepEqual(s.calls.map((c) => c.slice(0, 2).join(' ')).filter((c) => c.startsWith('tfplan2md')), ['tfplan2md default', 'tfplan2md summary']);
+  const comment = s.restCalls.at(-1).body.body;
+  assert.match(comment, /### Summary\n\ncounts\n\n_The full plan is too long for a comment; see the \[workflow run\]/);
+  const summary = fs.readFileSync(s.summary, 'utf8');
+  assert.equal(summary.split('\nrow').length - 1, 20_000);
+  assert.ok(!summary.includes('too long'));
 });
 
 test('reportPlan shows the plan as text when tfplan2md cannot run, and only logs a token that may not comment', async () => {
@@ -551,7 +567,7 @@ test('post reports a plan saved after main, before it stops the server, then rem
   });
   await new Promise((r) => server.close(r));
   assert.deepEqual(order, ['showPlan', 'server /shutdown']);
-  assert.match(fs.readFileSync(s.summary, 'utf8'), /^<!-- actions-state:plan:work -->\n/);
+  assert.match(fs.readFileSync(s.summary, 'utf8'), /^## Terraform plan · `work`\n/);
   assert.equal(fs.existsSync(path.join(s.workingDirectory, 'actions_state.tfplan')), false);
 });
 

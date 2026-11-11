@@ -177,6 +177,22 @@ test('renderPlan without a report shows the text diff, cut to fit the limit', ()
   assert.ok(body.endsWith('</sub>\n'));
 });
 
+test('renderPlan for the step summary has no marker and measures in bytes', () => {
+  const report = `# T\n\n${'é'.repeat(70_000)}\n`;
+  const comment = renderPlan({ ...base, report, summaryReport: '# T\n\n## Summary\n' }).body;
+  assert.match(comment, /^<!-- actions-state:plan:infra%2Fdns -->\n/);
+  assert.match(comment, /\n_The full plan is too long for a comment;/);
+  const summary = renderPlan({ ...base, report, summaryReport: '# T\n\n## Summary\n', target: 'summary', limit: 1024 * 1024 }).body;
+  assert.match(summary, /^## Terraform plan · `infra\/dns`\n/);
+  assert.ok(summary.includes('é'.repeat(70_000)));
+  const tight = renderPlan({ ...base, report, summaryReport: '# T\n\n## Summary\n', target: 'summary', limit: 60_000 }).body;
+  assert.match(tight, /\n_The full plan is too long for a step summary;/);
+  const cut = renderPlan({ ...base, text: `Terraform will perform the following actions:\n${'  + é\n'.repeat(20_000)}`, target: 'summary', limit: 50_000 }).body;
+  assert.ok(Buffer.byteLength(cut) <= 50_000);
+  assert.match(cut, /_Cut off: GitHub limits a step summary to 1 MiB; see the \[workflow run\]/);
+  assert.equal(renderPlan({ ...base, report, target: 'summary', limit: 10 }).body, '');
+});
+
 test('renderPlan fences text that holds backticks with a longer fence', () => {
   const { body } = renderPlan({ ...base, text: 'Terraform will perform the following actions:\n  + x = "```"\n' });
   assert.match(body, /````diff\n[^]*\n````\n/);

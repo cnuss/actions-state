@@ -318,14 +318,17 @@ async function reportPlan({ cfg, env = process.env, password = '', since = 0, sk
   }
 
   const pr = pullRequestOf(env);
-  const { body, changes, marker } = renderPlan({
+  const render = (target, limit) => renderPlan({
     name: cfg.name, tool: tool.kind, plan, report, summaryReport, text,
     serial: priorSerial(found), sha: (pr && pr.headSha) || env.GITHUB_SHA || '',
     runUrl: jobUrl || (env.GITHUB_RUN_ID ? `${cfg.serverUrl}/${cfg.repository}/actions/runs/${env.GITHUB_RUN_ID}` : ''),
     serverUrl: cfg.serverUrl, repository: cfg.repository,
     secrets: [...sensitiveValues(plan), cfg.token, cfg.passphrase, password].filter(Boolean),
+    target, limit,
   });
-  if (cfg.summary) appendSummary(() => body, { env, print });
+  // The summary has room for the whole report where a comment may not.
+  if (cfg.summary) appendSummary((left) => render('summary', left).body, { env, print });
+  const { body, changes, marker } = render('comment', COMMENT_LIMIT);
 
   let url = '';
   if (pr) {

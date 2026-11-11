@@ -211,17 +211,26 @@ function marker(name) {
   return `<!-- actions-state:plan:${encodeURIComponent(name).replace(/-/g, '%2D')} -->`;
 }
 
-// The comment body: marker, heading, counts, the plan and a footer naming the
-// state serial and commit it was made against. The plan is the tfplan2md
-// report when it fits, else its summary template, else the text diff, cut to fit.
+// Where a rendering goes: GitHub counts a comment in characters and a step
+// summary in bytes. Only a comment carries the marker that finds it again.
+const TARGETS = {
+  comment: { size: (s) => s.length, name: 'a comment', cap: `${COMMENT_LIMIT} characters`, marked: true },
+  summary: { size: (s) => Buffer.byteLength(s), name: 'a step summary', cap: '1 MiB', marked: false },
+};
+
+// Heading, counts, the plan and a footer naming the state serial and commit it
+// was made against. The plan is the tfplan2md report when it fits `limit`,
+// else its summary template, else the text diff, cut to fit.
 function renderPlan({
   name, tool = 'terraform', plan, report = null, summaryReport = null, text = null,
-  serial = null, sha = '', runUrl = '', serverUrl = 'https://github.com', repository = '', secrets = [], limit = COMMENT_LIMIT,
+  serial = null, sha = '', runUrl = '', serverUrl = 'https://github.com', repository = '', secrets = [],
+  target = 'comment', limit = COMMENT_LIMIT,
 }) {
+  const { size, name: where, cap, marked } = TARGETS[target];
   const counts = changeCounts(plan);
   const changes = hasChanges(counts);
   const label = tool === 'tofu' ? 'OpenTofu' : 'Terraform';
-  const head = [marker(name), `## ${label} plan · \`${name.replace(/`/g, "'")}\``, '', `**${headline(counts)}**`, ''];
+  const head = [...(marked ? [marker(name)] : []), `## ${label} plan · \`${name.replace(/`/g, "'")}\``, '', `**${headline(counts)}**`, ''];
   const foot = [];
   const facts = ['actions-state', serial === null ? 'new state' : `state serial ${serial}`];
   if (sha) facts.push(repository ? `commit [\`${sha.slice(0, 7)}\`](${serverUrl}/${repository}/commit/${sha})` : `commit \`${sha.slice(0, 7)}\``);
@@ -229,13 +238,13 @@ function renderPlan({
   foot.push(`<sub>${facts.join(' · ')}</sub>`);
   const compose = (body) => `${[...head, ...body, ...foot].join('\n')}\n`;
   const seeRun = runUrl ? `; see the [workflow run](${runUrl})` : '; see the workflow run';
-  const fits = (s) => s.length <= limit;
+  const fits = (s) => size(s) <= limit;
 
   let md = compose([]);
   if (changes && report) {
     md = compose([nestReport(redact(report, secrets)), '']);
     if (!fits(md) && summaryReport) {
-      md = compose([nestReport(redact(summaryReport, secrets)), '', `_The full plan is too long for a comment${seeRun}._`, '']);
+      md = compose([nestReport(redact(summaryReport, secrets)), '', `_The full plan is too long for ${where}${seeRun}._`, '']);
     }
   }
   if (changes && (!report || !fits(md)) && text !== null) {
@@ -243,17 +252,18 @@ function renderPlan({
     const fence = fenceFor(lines);
     const wrap = (kept, cut) => compose([
       '<details><summary>Show plan</summary>', '', `${fence}diff`, ...kept, fence, '', '</details>', '',
-      ...(cut ? [`_Cut off: GitHub limits a comment to ${COMMENT_LIMIT} characters${seeRun}._`, ''] : []),
+      ...(cut ? [`_Cut off: GitHub limits ${where} to ${cap}${seeRun}._`, ''] : []),
     ]);
     md = wrap(lines, false);
     if (!fits(md)) {
-      const room = limit - wrap([], true).length;
+      const room = limit - size(wrap([], true));
       const kept = [];
-      for (let i = 0, used = 0; i < lines.length && used + lines[i].length + 1 <= room; used += lines[i].length + 1, i += 1) kept.push(lines[i]);
+      for (let i = 0, used = 0; i < lines.length && used + size(lines[i]) + 1 <= room; used += size(lines[i]) + 1, i += 1) kept.push(lines[i]);
       md = wrap(kept, true);
     }
   }
-  if (!fits(md)) md = compose([`_The plan is too long for a comment${seeRun}._`, '']);
+  if (!fits(md)) md = compose([`_The plan is too long for ${where}${seeRun}._`, '']);
+  if (!fits(md)) md = '';
   return { body: md, changes, counts, marker: marker(name) };
 }
 
