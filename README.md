@@ -46,6 +46,10 @@ listed in `.git/info/exclude`.
   branches) may `plan` against the current state; `apply` is refused unless
   `allow-apply-from-any-ref: true`. A save is also refused if a newer version
   appeared since the state was read.
+- **Old commits don't apply over new ones.** Every save records its commit.
+  A run whose commit is behind that one (see
+  [Stale commits](#stale-commits)) may only plan, skips `run`, and sets
+  `stale: true`.
 - **Encryption.** With `passphrase`, state is encrypted (AES-256-GCM, key from
   scrypt) before it leaves the runner. Without one, the action refuses to run
   in a public repository or against a public package.
@@ -61,6 +65,7 @@ listed in `.git/info/exclude`.
 | `lock-timeout` | `600` | Seconds to wait for a lock held by another job. `0` fails at once. |
 | `replace-backend` | `false` | Proceed even if the configuration declares a backend. |
 | `allow-apply-from-any-ref` | `false` | Let refs other than the default branch apply. |
+| `if-stale` | `skip` | When this commit is behind the one that last saved the state: `skip`, `fail` or `allow`. See [Stale commits](#stale-commits). |
 | `include-sensitive` | `true` | Set sensitive Terraform outputs as step outputs too; `false` leaves them out. See [Terraform outputs](#terraform-outputs). |
 | `summary` | `true` | Write the Terraform outputs to the step summary; `false` turns it off. See [Terraform outputs](#terraform-outputs). |
 | `run` | | Commands to run in `working-directory` once the backend is up. See [Running Terraform in the step](#running-terraform-in-the-step). |
@@ -98,6 +103,7 @@ the package.
 | `<output name>` | Each Terraform root module output. See [Terraform outputs](#terraform-outputs). |
 | `json` | All included Terraform outputs as one JSON object (`{}` before the first apply). |
 | `sensitive` | Names of sensitive Terraform outputs, as a JSON array. |
+| `stale` | `true` when this commit is behind the one that last saved the state. See [Stale commits](#stale-commits). |
 
 ## Running Terraform in the step
 
@@ -261,6 +267,38 @@ jobs:
 Run once with `replace-backend: true` and `terraform init -migrate-state
 -force-copy`, which copies the old backend's state into actions-state. A local
 `terraform.tfstate` in the directory is migrated the same way.
+
+## Stale commits
+
+A `concurrency` group on the deploy job serializes runs, but GitHub hands the
+group to waiting runs as their earlier jobs finish, not in commit order. Merge
+two pull requests close together and the older commit's run can deploy last,
+applying its older configuration over the newer one.
+
+Each save records its commit in the `io.github.cnuss.actions-state.sha`
+annotation. When a read/write job starts, the action compares that commit with
+`GITHUB_SHA`. If this commit is `behind` it, the run is stale:
+
+- `skip` (the default) serves the state for planning only, skips `run`, and
+  sets the `stale` output to `true`. Applies and saves are refused with the
+  reason.
+- `fail` fails the step.
+- `allow` warns and applies anyway.
+
+Gate the job's other deploy steps on the output:
+
+```yaml
+- id: tf
+  uses: cnuss/actions-state@v1
+  with:
+    run: terraform apply -auto-approve
+- if: steps.tf.outputs.stale != 'true'
+  run: ./deploy.sh
+```
+
+Only commits that changed the state are recorded. A run behind a newer commit
+that saved nothing isn't caught. Commits GitHub can't compare (a force-pushed
+commit, unrelated history) aren't treated as stale.
 
 ## Limits
 

@@ -26,13 +26,14 @@ function readBody(req) {
 function createApp({
   password, lock, store, adapter, slug, name, isDefaultRef, allowAnyRef, lockTimeoutMs,
   passphrase, aad, meta,
+  stale = null, // why this commit may not write, when it is behind the one that saved the state
   log = () => {},
   sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
   onHeldChange = () => {},
   onShutdown = () => {},
   shutdownDrainMs = SHUTDOWN_DRAIN_MS,
 }) {
-  const writable = isDefaultRef || allowAnyRef;
+  const writable = (isDefaultRef || allowAnyRef) && !stale;
   let held = null;     // { id, info, virtual, entryId, holderId }
   let locking = null;  // lock info of a LOCK still waiting
   let loaded = null;   // { digest, serial } of the version Terraform last read
@@ -145,7 +146,7 @@ function createApp({
     if (held) return held.id === info.ID ? send(res, 200) : sendJson(res, 423, held.info);
     if (locking) return sendJson(res, 423, locking);
     if (!writable && info.Operation !== 'OperationTypePlan') {
-      const why = `${meta.ref} may only plan; set allow-apply-from-any-ref: true to apply from it`;
+      const why = stale ? `${stale}; it may only plan` : `${meta.ref} may only plan; set allow-apply-from-any-ref: true to apply from it`;
       log(`refused ${info.Operation} lock: ${why}`);
       return sendJson(res, 423, refusal(info, why));
     }
@@ -199,7 +200,7 @@ function createApp({
       await releaseHeld();
       return send(res, 200);
     }
-    if (!writable) return send(res, 403, `${meta.ref} may only plan; force-unlock from the default branch`);
+    if (!writable) return send(res, 403, stale ? `${stale}; force-unlock from a current commit` : `${meta.ref} may only plan; force-unlock from the default branch`);
     const current = await lock.readCurrent();
     if (!current) return send(res, 200);
     if (await lock.forceRelease(info.ID || '')) {
@@ -211,7 +212,8 @@ function createApp({
 
   async function postState(res, id, body) {
     if (!writable) {
-      log(`refused save from ${meta.ref}`);
+      log(`refused save from ${meta.ref}${stale ? ' (stale)' : ''}`);
+      if (stale) return send(res, 403, `${stale}; it may not save state`);
       return send(res, 403, `only the default branch may save state; set allow-apply-from-any-ref: true to allow ${meta.ref}`);
     }
     if (!id) {
@@ -324,7 +326,7 @@ async function start(env = process.env) {
   const server = nodeHttp.createServer();
   const app = createApp({
     password: env.ACTIONS_STATE_PASSWORD, lock, store, adapter: getAdapter(cfg.adapter),
-    slug: cfg.slug, name: cfg.name, isDefaultRef: cfg.isDefaultRef, allowAnyRef: cfg.allowAnyRef,
+    slug: cfg.slug, name: cfg.name, isDefaultRef: cfg.isDefaultRef, allowAnyRef: cfg.allowAnyRef, stale: cfg.stale || null,
     lockTimeoutMs: cfg.lockTimeoutMs, passphrase: env.ACTIONS_STATE_PASSPHRASE || '', aad: cfg.aad, meta: cfg.meta, log,
     onHeldChange: (h) => writeRunfile({ port, held: h && !h.virtual ? [h.entryId, h.holderId].filter(Boolean) : [] }),
     onShutdown: () => setTimeout(() => process.exit(0), 50),

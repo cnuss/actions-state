@@ -185,6 +185,22 @@ test('a plan-only ref plans without a cache lock and is refused applies and save
   await s.close();
 });
 
+test('a stale commit plans, and is refused applies and saves with the reason', async () => {
+  const why = 'old is behind new, which saved state "root"';
+  const s = await setup({ stale: why });
+  assert.equal((await s.call('LOCK', '/lock', s.lockBody('p', 'OperationTypePlan'))).status, 200);
+  assert.equal(s.lock.state.acquireCalls, 0);
+  assert.equal((await s.call('UNLOCK', '/lock', s.lockBody('p'))).status, 200);
+  const refused = await s.call('LOCK', '/lock', s.lockBody('x', 'OperationTypeApply'));
+  assert.equal(refused.status, 423);
+  assert.equal(JSON.parse(refused.text).Info, `${why}; it may only plan`);
+  const save = await s.call('POST', '/state?ID=x', stateJson(1));
+  assert.equal(save.status, 403);
+  assert.equal(save.text, `${why}; it may not save state`);
+  assert.equal(s.store.versions.length, 0);
+  await s.close();
+});
+
 test('allow-apply-from-any-ref takes a real lock on other refs', async () => {
   const s = await setup({ isDefaultRef: false, allowAnyRef: true });
   assert.equal((await s.call('LOCK', '/lock', s.lockBody('x'))).status, 200);

@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
-const { resolveConfig, jobPassword, claimRunfile, waitForServer, preflightActions, preflightPackages, needsWritePreflight, post, emitOutputs, writeSummary, fetchOutputs, runScript, scriptEnv, readStateOutputs, readOnlyRefusals } = require('../../index');
+const { staleness, resolveConfig, jobPassword, claimRunfile, waitForServer, preflightActions, preflightPackages, needsWritePreflight, post, emitOutputs, writeSummary, fetchOutputs, runScript, scriptEnv, readStateOutputs, readOnlyRefusals } = require('../../index');
 
 const baseEnv = {
   GITHUB_WORKSPACE: '/w', GITHUB_REPOSITORY: 'CNuss/Thing', GITHUB_REF: 'refs/heads/main', RUNNER_TEMP: '/tmp/rt',
@@ -326,4 +326,38 @@ test('readStateOutputs reads the newest version of another repo\'s state, decryp
 test('readOnlyRefusals: run needs the state served from this repository', () => {
   assert.throws(() => readOnlyRefusals({ source: 'o/infra', run: 'terraform plan' }), /`run` needs the state served from this repository; o\/infra's state is only read/);
   assert.doesNotThrow(() => readOnlyRefusals({ source: 'o/infra', run: '' }));
+});
+
+test('resolveConfig: if-stale is skip by default, and only skip, fail or allow', () => {
+  assert.equal(resolveConfig(baseEnv).ifStale, 'skip');
+  assert.equal(resolveConfig({ ...baseEnv, 'INPUT_IF-STALE': 'fail' }).ifStale, 'fail');
+  assert.equal(resolveConfig({ ...baseEnv, 'INPUT_IF-STALE': 'allow' }).ifStale, 'allow');
+  assert.throws(() => resolveConfig({ ...baseEnv, 'INPUT_IF-STALE': 'ignore' }), /if-stale must be skip, fail or allow/);
+});
+
+test('staleness: a commit behind the one that saved the state is stale; anything else is not', async () => {
+  const { PREFIX } = require('../../src/core/store');
+  const storeSavedBy = (sha) => ({ resolve: async () => (sha === null ? null : { manifest: { annotations: sha ? { [`${PREFIX}.sha`]: sha } : {} } }) });
+  const statuses = { 'new...old': 'behind', 'old...new': 'ahead', 'a...b': 'diverged' };
+  const compared = [];
+  const rest = async (method, path) => {
+    const key = path.match(/compare\/(.+)\?/)[1];
+    compared.push(key);
+    if (key === 'gone...old') return { status: 404, json: {}, text: '' };
+    if (key === 'err...old') return { status: 500, json: {}, text: 'boom' };
+    return { status: 200, json: { status: statuses[key] }, text: '' };
+  };
+  const check = (saved, sha, warnings = []) => staleness({ store: storeSavedBy(saved), slug: 'root', rest, repository: 'o/r', sha }, (w) => warnings.push(w));
+
+  assert.deepEqual(await check('new', 'old'), { stale: true, saved: 'new', status: 'behind' });
+  assert.equal((await check('old', 'new')).stale, false);
+  assert.equal((await check('a', 'b')).stale, false);
+  assert.equal((await check('gone', 'old')).stale, false);
+  assert.deepEqual(await check('same', 'same'), { stale: false, saved: 'same' });
+  assert.deepEqual(await check('', 'old'), { stale: false, saved: '' });
+  assert.deepEqual(await check(null, 'old'), { stale: false, saved: '' });
+  const warnings = [];
+  assert.equal((await check('err', 'old', warnings)).stale, false);
+  assert.match(warnings[0], /could not compare old with err/);
+  assert.deepEqual(compared, ['new...old', 'old...new', 'a...b', 'gone...old', 'err...old']);
 });

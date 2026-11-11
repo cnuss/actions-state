@@ -51,4 +51,13 @@ async function findSelfJob(rest, env, { timeoutMs = 60_000, sleep = (ms) => new 
   }
 }
 
-module.exports = { repoInfo, packageVisibility, findSelfJob };
+// How head relates to base: identical, ahead, behind or diverged. null when
+// GitHub can't compare them (a commit that is gone, or no common history).
+async function compareCommits(rest, repository, base, head) {
+  const r = await rest('GET', `/repos/${repository}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}?per_page=1`);
+  if (r.status === 404 || r.status === 422) return null;
+  if (r.status !== 200) throw new Error(`comparing ${base}...${head}: HTTP ${r.status}: ${r.text}`);
+  return r.json.status || null;
+}
+
+module.exports = { repoInfo, packageVisibility, findSelfJob, compareCommits };

@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { repoInfo, packageVisibility, findSelfJob } = require('../../src/core/github');
+const { repoInfo, packageVisibility, findSelfJob, compareCommits } = require('../../src/core/github');
 
 function stubRest(routes) {
   const calls = [];
@@ -87,4 +87,21 @@ test('findSelfJob takes a job not yet marked in progress but skips completed job
     ] }],
   });
   assert.equal((await findSelfJob(rest, selfEnv, { sleep: async () => {} })).id, 6);
+});
+
+test('compareCommits returns how head relates to base, and null when GitHub cannot compare them', async () => {
+  const { rest, calls } = stubRest({
+    'GET /repos/o/r/compare/new...old?per_page=1': [200, { status: 'behind' }],
+    'GET /repos/o/r/compare/gone...old?per_page=1': [404, {}],
+    'GET /repos/o/r/compare/x...y?per_page=1': [422, {}],
+  });
+  assert.equal(await compareCommits(rest, 'o/r', 'new', 'old'), 'behind');
+  assert.equal(await compareCommits(rest, 'o/r', 'gone', 'old'), null);
+  assert.equal(await compareCommits(rest, 'o/r', 'x', 'y'), null);
+  assert.equal(calls[0], 'GET /repos/o/r/compare/new...old?per_page=1');
+});
+
+test('compareCommits throws on other statuses', async () => {
+  const { rest } = stubRest({ 'GET /repos/o/r/compare/a...b?per_page=1': [500, {}] });
+  await assert.rejects(compareCommits(rest, 'o/r', 'a', 'b'), /HTTP 500/);
 });

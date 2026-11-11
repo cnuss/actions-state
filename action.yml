@@ -33,6 +33,10 @@ inputs:
     description: 'Let refs other than the default branch apply and save state. Locks taken on other refs do not exclude each other.'
     required: false
     default: 'false'
+  if-stale:
+    description: 'When this commit is behind the one that last saved the state: skip (plan only, skip run, set stale), fail, or allow.'
+    required: false
+    default: 'skip'
   include-sensitive:
     description: 'Set sensitive Terraform outputs as step outputs too, masked in logs. GitHub drops job outputs that contain masked values. false leaves them out.'
     required: false
@@ -61,6 +65,8 @@ outputs:
     description: 'Terraform root module outputs as a JSON object: of the state after run when given, else of the state as loaded. Each output is also a step output of its own name.'
   sensitive:
     description: 'Names of sensitive Terraform outputs, as a JSON array.'
+  stale:
+    description: 'true when this commit is behind the one that last saved the state, so it was held to planning. Gate later deploy steps on it.'
 
 runs:
   using: 'node24'

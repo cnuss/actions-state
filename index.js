@@ -13,7 +13,7 @@ const { deriveName, tagSlug, imageName } = require('./src/core/names');
 const { aadFor, isEncrypted, decrypt } = require('./src/core/crypto');
 const { request, restClient } = require('./src/core/http');
 const { createStore, PREFIX } = require('./src/core/store');
-const { repoInfo, packageVisibility, findSelfJob } = require('./src/core/github');
+const { repoInfo, packageVisibility, findSelfJob, compareCommits } = require('./src/core/github');
 const { getAdapter } = require('./src/adapters');
 const { toStepOutputs } = require('./src/outputs');
 const { renderSummary, LIMIT: SUMMARY_LIMIT } = require('./src/summary');
@@ -47,6 +47,8 @@ function resolveConfig(env) {
   // Encryption binds the name the writer saw as GITHUB_REPOSITORY.
   const source = readOnly ? given : env.GITHUB_REPOSITORY;
   if (!/^\d+$/.test(lockTimeout)) throw new Error(`lock-timeout must be a whole number of seconds, got "${lockTimeout}"`);
+  const ifStale = input(env, 'if-stale') || 'skip';
+  if (!['skip', 'fail', 'allow'].includes(ifStale)) throw new Error(`if-stale must be skip, fail or allow, got "${ifStale}"`);
   return {
     workingDirectory: path.resolve(workspace, dirInput),
     name,
@@ -61,6 +63,7 @@ function resolveConfig(env) {
     lockTimeoutMs: Number(lockTimeout) * 1000,
     replaceBackend: input(env, 'replace-backend') === 'true',
     allowAnyRef: input(env, 'allow-apply-from-any-ref') === 'true',
+    ifStale,
     includeSensitive: input(env, 'include-sensitive') !== 'false',
     summary: input(env, 'summary') !== 'false',
     token: input(env, 'github-token'),
@@ -159,6 +162,22 @@ function runScript(script, { cwd, env, scriptDir }) {
   }).finally(() => fs.rmSync(file, { force: true }));
 }
 
+// Whether sha is behind the commit that last saved the state: an older run
+// that would apply over a newer one. Anything GitHub can't compare is not stale.
+async function staleness({ store, slug, rest, repository, sha }, onWarning = warn) {
+  const resolved = await store.resolve(slug);
+  const saved = resolved?.manifest?.annotations?.[`${PREFIX}.sha`] || '';
+  if (!saved || !sha || saved === sha) return { stale: false, saved };
+  let status;
+  try {
+    status = await compareCommits(rest, repository, saved, sha);
+  } catch (err) {
+    onWarning(`could not compare ${sha} with ${saved}, which saved the state: ${err.message}`);
+    return { stale: false, saved };
+  }
+  return { stale: status === 'behind', saved, status };
+}
+
 // Another repository's state is read, never served: no backend, no lock.
 function readOnlyRefusals({ source, run }) {
   if (run) throw new Error(`\`run\` needs the state served from this repository; ${source}'s state is only read`);
@@ -255,6 +274,23 @@ async function main() {
     await preflightPackages(createStore({ registry: REGISTRY, image: cfg.image, token: cfg.token }));
   }
 
+  let stale = null;
+  if (isDefaultRef || cfg.allowAnyRef) {
+    const store = createStore({ registry: REGISTRY, image: cfg.image, token: cfg.token, access: 'pull' });
+    const check = await staleness({ store, slug: cfg.slug, rest, repository: cfg.repository, sha: env.GITHUB_SHA });
+    if (check.stale) {
+      const why = `${env.GITHUB_SHA} is behind ${check.saved}, which saved state "${cfg.name}"`;
+      if (cfg.ifStale === 'fail') throw new Error(`${why}; set if-stale: allow to apply it anyway`);
+      if (cfg.ifStale === 'skip') {
+        stale = why;
+        log(`::notice title=actions-state::${why}: planning only, and skipping run`);
+      } else {
+        warn(`${why}; applying anyway (if-stale: allow)`);
+      }
+    }
+  }
+  setOutput('stale', String(Boolean(stale)));
+
   fs.mkdirSync(cfg.runDir, { recursive: true });
   const runfile = claimRunfile(cfg.runDir, cfg.slug, cfg.name);
   const logFile = path.join(cfg.runDir, `${cfg.slug}.log`);
@@ -268,7 +304,7 @@ async function main() {
     runfile, apiUrl: cfg.apiUrl, registry: REGISTRY, repository: cfg.repository, ref: cfg.ref,
     slug: cfg.slug, name: cfg.name, image: cfg.image, adapter: adapter.name,
     identity: { run_id: env.GITHUB_RUN_ID, run_attempt: env.GITHUB_RUN_ATTEMPT, job_id: job.id, job_name: job.name, job_url: job.url, ref: cfg.ref },
-    isDefaultRef, allowAnyRef: cfg.allowAnyRef, lockTimeoutMs: cfg.lockTimeoutMs, aad: cfg.aad,
+    isDefaultRef, allowAnyRef: cfg.allowAnyRef, stale, lockTimeoutMs: cfg.lockTimeoutMs, aad: cfg.aad,
     meta: { runId: env.GITHUB_RUN_ID, sha: env.GITHUB_SHA, ref: cfg.ref, defaultRef, source: `${cfg.serverUrl}/${cfg.repository}` },
   };
   const out = fs.openSync(logFile, 'a');
@@ -290,10 +326,10 @@ async function main() {
   setOutput('state-name', cfg.name);
   setOutput('image', `ghcr.io/${cfg.image}`);
   setOutput('address', `${endpoint}/state`);
-  const mode = isDefaultRef ? 'read/write' : cfg.allowAnyRef ? 'read/write (allow-apply-from-any-ref)' : 'plan only';
+  const mode = stale ? 'plan only (stale)' : isDefaultRef ? 'read/write' : cfg.allowAnyRef ? 'read/write (allow-apply-from-any-ref)' : 'plan only';
   log(`[actions-state] serving "${cfg.name}" from ghcr.io/${cfg.image}:${cfg.slug} (${mode}) at ${endpoint}`);
 
-  const script = input(env, 'run');
+  const script = stale ? '' : input(env, 'run');
   if (script) {
     const code = await runScript(script, { cwd: cfg.workingDirectory, env: scriptEnv(env, password), scriptDir: cfg.runDir });
     if (code !== 0) throw new Error(`the run script exited with code ${code}`);
@@ -353,7 +389,7 @@ async function post({ env = process.env, print = log } = {}) {
   });
 }
 
-module.exports = { resolveConfig, jobPassword, claimRunfile, waitForServer, preflightActions, preflightPackages, needsWritePreflight, post, emitOutputs, writeSummary, fetchOutputs, runScript, scriptEnv, readStateOutputs, readOnlyRefusals };
+module.exports = { staleness, resolveConfig, jobPassword, claimRunfile, waitForServer, preflightActions, preflightPackages, needsWritePreflight, post, emitOutputs, writeSummary, fetchOutputs, runScript, scriptEnv, readStateOutputs, readOnlyRefusals };
 
 if (require.main === module) {
   const run = process.env.STATE_post === 'true' ? post : main;
