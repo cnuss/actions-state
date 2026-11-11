@@ -531,6 +531,124 @@ jobs:
           [ "${{ steps.apply.outcome }}" = failure ]
           grep -q 'may only plan' "$RUNNER_TEMP/apply.log"
 
+  # These states are only planned, never saved, so their names stay the same
+  # from run to run: each pull request keeps one comment per state, updated.
+  plan-comment:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      actions: write
+      packages: write
+      contents: read
+      pull-requests: write
+    strategy:
+      fail-fast: false
+      matrix:
+        tool: [terraform, tofu]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: test/scripts/install-tool.sh ${{ matrix.tool }}
+      - id: state
+        uses: ./
+        with:
+          working-directory: ${{ env.FIXTURE }}
+          name: it-plan-${{ matrix.tool }}
+          passphrase: ${{ env.PASSPHRASE }}
+          run: |
+            ${{ matrix.tool }} init -input=false
+            ${{ matrix.tool }} plan -input=false -var value=two
+      - name: A plain plan is saved, rendered with tfplan2md to the step summary and commented
+        env:
+          CHANGES: ${{ steps.state.outputs.plan-changes }}
+          URL: ${{ steps.state.outputs.plan-comment-url }}
+          LABEL: ${{ matrix.tool == 'tofu' && 'OpenTofu' || 'Terraform' }}
+          TOOL: ${{ matrix.tool }}
+        run: |
+          test "$CHANGES" = true
+          test -f "$FIXTURE/actions_state.tfplan"
+          heading="## $LABEL plan · \`it-plan-$TOOL\`"
+          md=""
+          for f in "$(dirname "$GITHUB_STEP_SUMMARY")"/step_summary_*-scrubbed; do
+            if [ -f "$f" ] && grep -qxF "$heading" "$f"; then md=$f; fi
+          done
+          test -n "$md"
+          cat "$md"
+          grep -xF '**Plan: 1 to add, 0 to change, 0 to destroy. 1 output to change.**' "$md"
+          grep -xF '### Summary' "$md"
+          grep -F 'terraform_data' "$md"
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            test -n "$URL"
+            node test/scripts/plan-comment.js "it-plan-$TOOL" > "$RUNNER_TEMP/comment.md"
+            grep -xF "$heading" "$RUNNER_TEMP/comment.md"
+            grep -F "/actions/runs/$GITHUB_RUN_ID/" "$RUNNER_TEMP/comment.md"
+          fi
+      - name: A later, different plan, which post puts in the same comment
+        working-directory: ${{ env.FIXTURE }}
+        run: ${{ matrix.tool }} plan -input=false -var value=three
+
+  plan-comment-verify:
+    needs: plan-comment
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    strategy:
+      fail-fast: false
+      matrix:
+        tool: [terraform, tofu]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Each state still has one comment, edited to the later plan
+        run: |
+          node test/scripts/plan-comment.js "it-plan-${{ matrix.tool }}" | tee "$RUNNER_TEMP/comment.md"
+          grep -F "/actions/runs/$GITHUB_RUN_ID/" "$RUNNER_TEMP/comment.md"
+          grep -F '`three`' "$RUNNER_TEMP/comment.md"
+          if grep -F '`two`' "$RUNNER_TEMP/comment.md"; then
+            echo "::error::the comment still shows the first plan"
+            exit 1
+          fi
+
+  plan-in-post:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      actions: write
+      packages: write
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: test/scripts/install-tool.sh terraform
+      - uses: ./
+        with:
+          working-directory: ${{ env.FIXTURE }}
+          name: it-plan-post
+          passphrase: ${{ env.PASSPHRASE }}
+      - name: A plan saved with its own -out after the action step
+        working-directory: ${{ env.FIXTURE }}
+        run: |
+          terraform init -input=false
+          terraform plan -input=false -var value=three -out=tfplan
+          test ! -e actions_state.tfplan
+
+  plan-in-post-verify:
+    needs: plan-in-post
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: The post step commented the plan
+        run: |
+          node test/scripts/plan-comment.js it-plan-post | tee "$RUNNER_TEMP/comment.md"
+          grep -F "/actions/runs/$GITHUB_RUN_ID/" "$RUNNER_TEMP/comment.md"
+          grep -xF '**Plan: 1 to add, 0 to change, 0 to destroy. 1 output to change.**' "$RUNNER_TEMP/comment.md"
+
   cleanup:
     needs: [smoke-reload, run-fails, lifecycle-reload, wrong-passphrase, public-guard, backend-conflict, contention-verify, fail-fast, fail-fast-holder, crash-holder, crash-waiter, stale-save, refs]
     if: always()

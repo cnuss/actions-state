@@ -4,7 +4,7 @@
 // because GitHub drops job outputs that contain masked values.
 
 // The action's own outputs.
-const RESERVED = new Set(['json', 'sensitive', 'state-name', 'image', 'address']);
+const RESERVED = new Set(['json', 'sensitive', 'state-name', 'image', 'address', 'plan-changes', 'plan-comment-url']);
 
 function toStepOutputs(outputs, { includeSensitive = false } = {}) {
   const entries = [];

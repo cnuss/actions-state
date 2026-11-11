@@ -1,8 +1,9 @@
 'use strict';
 
 // pre takes the state lock for the whole job (pre.js); main checks the
-// configuration, starts the state server and points Terraform at it; post stops
-// the server, removes the override file and releases the job's lock (post.js).
+// configuration, starts the state server and points Terraform at it; post
+// reports a plan saved after main, stops the server, removes the override file
+// and releases the job's lock (post.js).
 // Each has its own entry: with a pre, post runs even when main was skipped.
 
 const fs = require('fs');
@@ -15,10 +16,12 @@ const { aadFor, isEncrypted, decrypt } = require('./src/core/crypto');
 const { request, restClient, cacheClient } = require('./src/core/http');
 const { createLock } = require('./src/core/lock');
 const { createStore, PREFIX } = require('./src/core/store');
-const { repoInfo, packageVisibility, findSelfJob } = require('./src/core/github');
+const { repoInfo, packageVisibility, findSelfJob, pullRequestOf, upsertComment } = require('./src/core/github');
 const { getAdapter } = require('./src/adapters');
 const { toStepOutputs } = require('./src/outputs');
 const { renderSummary, LIMIT: SUMMARY_LIMIT } = require('./src/summary');
+const { COMMENT_LIMIT, findPlanFile, priorSerial, changeCounts, hasChanges, sensitiveValues, renderPlan } = require('./src/plan');
+const planTools = require('./src/plan-tools');
 
 const REGISTRY = 'https://ghcr.io';
 const START_TIMEOUT_MS = 10_000;
@@ -141,13 +144,13 @@ function basicAuth(password) {
   return { Authorization: `Basic ${Buffer.from(`actions-state:${password}`).toString('base64')}` };
 }
 
-// A run step's environment: the step env and the backend password, without
-// the action's inputs (passphrase, token).
-function scriptEnv(env, password) {
+// A run step's environment: the step env, the backend password and `extra`,
+// without the action's inputs (passphrase, token).
+function scriptEnv(env, password, extra = {}) {
   const result = {};
   for (const [k, v] of Object.entries(env)) if (!k.startsWith('INPUT_')) result[k] = v;
   result.TF_HTTP_PASSWORD = password;
-  return result;
+  return { ...result, ...extra };
 }
 
 // Runs like a bash `run:` step: GitHub's default bash flags, output streamed.
@@ -256,17 +259,19 @@ function emitOutputs(outputs, { env = process.env, print = log, includeSensitive
   return result;
 }
 
-// A failed summary only warns: it must not fail the step.
-function writeSummary(outputs, { env = process.env, print = log, name, image } = {}) {
+// Appends render(bytes left) to the step summary. A failed summary only
+// warns: it must not fail the step.
+function appendSummary(render, { env = process.env, print = log } = {}) {
   try {
     const file = env.GITHUB_STEP_SUMMARY;
-    if (!file || !Object.keys(outputs).length) return;
+    if (!file) return;
     const fd = fs.openSync(file, 'a');
     try {
       const used = fs.fstatSync(fd).size;
       const sep = used ? '\n' : '';
-      const md = renderSummary(outputs, { name, image, limit: SUMMARY_LIMIT - used - sep.length });
-      if (!md) throw new Error('the step summary is full');
+      const limit = SUMMARY_LIMIT - used - sep.length;
+      const md = render(limit);
+      if (!md || Buffer.byteLength(md) > limit) throw new Error('the step summary is full');
       fs.writeSync(fd, `${sep}${md}`);
     } finally {
       fs.closeSync(fd);
@@ -276,11 +281,79 @@ function writeSummary(outputs, { env = process.env, print = log, name, image } =
   }
 }
 
+function writeSummary(outputs, { env = process.env, print = log, name, image } = {}) {
+  if (!Object.keys(outputs).length) return;
+  appendSummary((limit) => renderSummary(outputs, { name, image, limit }), { env, print });
+}
+
+const sha256 = (bytes) => crypto.createHash('sha256').update(bytes).digest('hex');
+
+// The newest plan saved in working-directory since `since`, unless it is the
+// one already reported (`skipDigest`): rendered to the step summary and to
+// this state's comment on the pull request. A pull request with no changes
+// gets no new comment, but an earlier comment is updated to say so. Returns
+// null when there is no new plan.
+async function reportPlan({ cfg, env = process.env, password = '', since = 0, skipDigest = '', jobUrl = '', rest, print = log, tools = planTools }) {
+  const found = findPlanFile(cfg.workingDirectory, { since });
+  if (!found) return null;
+  const digest = sha256(found.bytes);
+  if (digest === skipDigest) return null;
+  const toolEnv = scriptEnv(env, password, { TF_IN_AUTOMATION: '1' });
+  const opts = { cwd: cfg.workingDirectory, env: toolEnv };
+  const { tool, plan } = await tools.showPlan(found.file, opts);
+  print(`[actions-state] read the plan ${path.basename(found.file)} with ${tool.file}`);
+
+  let report = null;
+  let summaryReport = null;
+  let text = null;
+  if (hasChanges(changeCounts(plan))) {
+    try {
+      const bin = await tools.installTfplan2md({ cacheDir: env.RUNNER_TOOL_CACHE || cfg.runDir });
+      report = await tools.tfplan2md(bin, plan, { tmpDir: cfg.runDir });
+      if (report.length > COMMENT_LIMIT) summaryReport = await tools.tfplan2md(bin, plan, { tmpDir: cfg.runDir, template: 'summary' });
+    } catch (err) {
+      print(`[actions-state] tfplan2md is not available, so the plan is shown as text: ${err.message}`);
+    }
+    if (!report || summaryReport) text = await tools.showText(tool, found.file, opts);
+  }
+
+  const pr = pullRequestOf(env);
+  const render = (target, limit) => renderPlan({
+    name: cfg.name, tool: tool.kind, plan, report, summaryReport, text,
+    serial: priorSerial(found), sha: (pr && pr.headSha) || env.GITHUB_SHA || '',
+    runUrl: jobUrl || (env.GITHUB_RUN_ID ? `${cfg.serverUrl}/${cfg.repository}/actions/runs/${env.GITHUB_RUN_ID}` : ''),
+    serverUrl: cfg.serverUrl, repository: cfg.repository,
+    secrets: [...sensitiveValues(plan), cfg.token, cfg.passphrase, password].filter(Boolean),
+    target, limit,
+  });
+  // The summary has room for the whole report where a comment may not.
+  if (cfg.summary) appendSummary((left) => render('summary', left).body, { env, print });
+  const { body, changes, marker } = render('comment', COMMENT_LIMIT);
+
+  let url = '';
+  if (pr) {
+    try {
+      const r = await upsertComment(rest, { repository: cfg.repository, number: pr.number, marker, body, create: changes });
+      if (r.result === 'forbidden') print(`[actions-state] not commenting on #${pr.number}: the token may not write pull request comments (permissions: pull-requests: write)`);
+      else if (r.result === 'skipped') print(`[actions-state] no changes, so no comment on #${pr.number}`);
+      else {
+        url = r.url || '';
+        print(`[actions-state] ${r.result} the plan comment on #${pr.number}: ${url}`);
+      }
+    } catch (err) {
+      print(`::warning::[actions-state] commenting the plan on #${pr.number} failed: ${err.message}`);
+    }
+  }
+  return { changes, url, digest };
+}
+
 async function main() {
   const env = process.env;
   const cfg = resolveConfig(env);
   if (!cfg.token) throw new Error('input `github-token` is required');
   if (cfg.readOnly) return mainReadOnly(cfg);
+  // Whole seconds: some file systems keep mtimes no finer.
+  const since = Math.floor(Date.now() / 1000) * 1000;
   const adapter = getAdapter('terraform');
   adapter.check(cfg.workingDirectory, { replaceBackend: cfg.replaceBackend });
 
@@ -308,6 +381,8 @@ async function main() {
   saveState('runfile', runfile);
   saveState('log_file', logFile);
   saveState('working_directory', cfg.workingDirectory);
+  saveState('plan_since', String(since));
+  saveState('job_url', job.url || '');
   const password = jobPassword(cfg.runDir);
   log(`::add-mask::${password}`);
 
@@ -334,6 +409,8 @@ async function main() {
 
   adapter.wire(cfg.workingDirectory, { endpoint });
   exportVariable('TF_HTTP_PASSWORD', password);
+  const planArgs = adapter.planArgs(env.TF_CLI_ARGS_plan || '');
+  exportVariable('TF_CLI_ARGS_plan', planArgs);
   setOutput('state-name', cfg.name);
   setOutput('image', `ghcr.io/${cfg.image}`);
   setOutput('address', `${endpoint}/state`);
@@ -342,17 +419,28 @@ async function main() {
 
   const script = input(env, 'run');
   if (script) {
-    const code = await runScript(script, { cwd: cfg.workingDirectory, env: scriptEnv(env, password), scriptDir: cfg.runDir });
+    const code = await runScript(script, { cwd: cfg.workingDirectory, env: scriptEnv(env, password, { TF_CLI_ARGS_plan: planArgs }), scriptDir: cfg.runDir });
     if (code !== 0) throw new Error(`the run script exited with code ${code}`);
   }
   const outputs = await fetchOutputs(endpoint, password);
   const { entries, sensitive } = emitOutputs(outputs, { includeSensitive: cfg.includeSensitive });
   log(`[actions-state] set ${entries.length} outputs${sensitive.length ? `; sensitive: ${sensitive.join(', ')}` : ''}`);
   if (cfg.summary) writeSummary(outputs, { name: cfg.name, image: `ghcr.io/${cfg.image}:${cfg.slug}` });
+  let planned = null;
+  try {
+    planned = await reportPlan({ cfg, env, password, since, jobUrl: job.url, rest });
+  } catch (err) {
+    warn(`[actions-state] reporting the plan failed: ${err.message}`);
+  }
+  if (planned) {
+    setOutput('plan-changes', String(planned.changes));
+    setOutput('plan-comment-url', planned.url);
+    saveState('plan_digest', planned.digest);
+  }
 }
 
 // Every step runs even when an earlier one fails.
-async function post({ env = process.env, print = log } = {}) {
+async function post({ env = process.env, print = log, tools = planTools } = {}) {
   const attempt = async (what, fn) => {
     try { await fn(); } catch (err) { print(`::warning::[actions-state] ${what} failed: ${err.message}`); }
   };
@@ -369,6 +457,17 @@ async function post({ env = process.env, print = log } = {}) {
     try { run = JSON.parse(fs.readFileSync(runfile, 'utf8') || '{}'); } catch { /* server never wrote it */ }
     let password = '';
     try { password = fs.readFileSync(path.join(path.dirname(runfile), 'password'), 'utf8'); } catch { /* main failed early */ }
+
+    // Before the server stops: `show` may read the backend.
+    if (run.port && password && env.STATE_working_directory) {
+      await attempt('reporting the plan', async () => {
+        const cfg = resolveConfig(env);
+        await reportPlan({
+          cfg, env, password, since: Number(env.STATE_plan_since) || 0, skipDigest: env.STATE_plan_digest || '',
+          jobUrl: env.STATE_job_url || '', rest, print, tools,
+        });
+      });
+    }
 
     let stopped = false;
     if (run.port && password) {
@@ -412,7 +511,7 @@ async function post({ env = process.env, print = log } = {}) {
   });
 }
 
-module.exports = { pre, resolveConfig, jobPassword, claimRunfile, waitForServer, preflightActions, preflightPackages, needsWritePreflight, post, emitOutputs, writeSummary, fetchOutputs, runScript, scriptEnv, readStateOutputs, readOnlyRefusals };
+module.exports = { reportPlan, appendSummary, pre, resolveConfig, jobPassword, claimRunfile, waitForServer, preflightActions, preflightPackages, needsWritePreflight, post, emitOutputs, writeSummary, fetchOutputs, runScript, scriptEnv, readStateOutputs, readOnlyRefusals };
 
 if (require.main === module) {
   main().catch((err) => {

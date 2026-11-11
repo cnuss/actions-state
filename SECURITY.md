@@ -33,10 +33,15 @@ encrypts them with a caller-supplied passphrase. It reads runner-injected
 environment (`ACTIONS_RUNTIME_TOKEN`, `ACTIONS_RESULTS_URL`) and uses the
 caller's own short-lived job tokens, which expire with the job.
 
+It also renders saved plans into pull request comments, with a pinned
+tfplan2md release it downloads and checks against a SHA-256 kept in the
+action.
+
 In scope: state readable by anyone other than the repository's readers, state
 decryptable without the passphrase, the local server answering requests without
 the per-job password, releasing or stealing a lock held by a live job, token
-leakage to logs, and supply-chain tampering with releases or tags.
+leakage to logs, a value the plan marks sensitive reaching a comment, and
+supply-chain tampering with releases, tags or the tfplan2md download.
 
 Out of scope: what Terraform or OpenTofu itself does with state, and the
 latency and eventual-consistency characteristics of the cache service.

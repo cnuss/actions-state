@@ -78,9 +78,25 @@ test('wire writes the override and excludes it from git; unwire removes it', () 
   assert.match(hcl, /unlock_address\s+= "http:\/\/127\.0\.0\.1:5000\/lock"/);
   assert.match(hcl, /username\s+= "actions-state"/);
   tf.wire(dir, { endpoint: 'http://127.0.0.1:5000' });
-  assert.equal(fs.readFileSync(path.join(repo, '.git/info/exclude'), 'utf8'), '/infra/actions_state_override.tf\n');
+  assert.equal(fs.readFileSync(path.join(repo, '.git/info/exclude'), 'utf8'), '/infra/actions_state_override.tf\n/infra/actions_state.tfplan\n');
   tf.unwire(dir);
   assert.equal(fs.existsSync(path.join(dir, tf.OVERRIDE_FILE)), false);
+});
+
+test('wire removes a plan left by an earlier job; unwire removes the plan', () => {
+  const dir = tmpdir({ 'main.tf': '', 'actions_state.tfplan': 'old', 'tfplan': 'mine' });
+  tf.wire(dir, { endpoint: 'http://127.0.0.1:1' });
+  assert.equal(fs.existsSync(path.join(dir, tf.PLAN_FILE)), false);
+  fs.writeFileSync(path.join(dir, tf.PLAN_FILE), 'new');
+  tf.unwire(dir);
+  assert.equal(fs.existsSync(path.join(dir, tf.PLAN_FILE)), false);
+  assert.equal(fs.readFileSync(path.join(dir, 'tfplan'), 'utf8'), 'mine');
+});
+
+test('planArgs puts -out first so the command line wins, once', () => {
+  assert.equal(tf.planArgs(''), '-out=actions_state.tfplan');
+  assert.equal(tf.planArgs('-lock-timeout=60s'), '-out=actions_state.tfplan -lock-timeout=60s');
+  assert.equal(tf.planArgs('-out=actions_state.tfplan -x'), '-out=actions_state.tfplan -x');
 });
 
 test('wire works outside git and when .git is a file', () => {

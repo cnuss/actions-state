@@ -68,7 +68,7 @@ listed in `.git/info/exclude`.
 | `include-sensitive` | `true` | Set sensitive Terraform outputs as step outputs too; `false` leaves them out. See [Terraform outputs](#terraform-outputs). |
 | `summary` | `true` | Write the Terraform outputs to the step summary; `false` turns it off. See [Terraform outputs](#terraform-outputs). |
 | `run` | | Commands to run in `working-directory` once the backend is up. See [Running Terraform in the step](#running-terraform-in-the-step). |
-| `github-token` | `${{ github.token }}` | Needs `actions: write` and `packages: write`. |
+| `github-token` | `${{ github.token }}` | Needs `actions: write` and `packages: write`; with `pull-requests: write` it also [comments the plan](#plans-on-pull-requests). |
 
 ## Names
 
@@ -90,7 +90,8 @@ On the default branch, or with `allow-apply-from-any-ref`, the action checks
 runs if either is missing. Plan-only jobs (other refs) do not need the write
 permissions, but still need `actions: read`, `packages: read` and
 `contents: read`, because the action reads the repository, this job's id and
-the package.
+the package. `pull-requests: write` is optional: with it, the plan is
+commented on the pull request.
 
 ## Outputs
 
@@ -102,6 +103,8 @@ the package.
 | `<output name>` | Each Terraform root module output. See [Terraform outputs](#terraform-outputs). |
 | `json` | All included Terraform outputs as one JSON object (`{}` before the first apply). |
 | `sensitive` | Names of sensitive Terraform outputs, as a JSON array. |
+| `plan-changes` | `true` or `false`: whether the plan saved by `run` changes anything. See [Plans on pull requests](#plans-on-pull-requests). |
+| `plan-comment-url` | The pull request comment that plan went to, or empty. |
 
 ## Running Terraform in the step
 
@@ -243,8 +246,8 @@ jobs:
   in `sensitive` (a JSON array). GitHub drops job outputs that contain masked
   values, so they only reach later steps of the same job.
   `include-sensitive: false` leaves them out of the step outputs and `json`.
-- An output named `json`, `sensitive`, `state-name`, `image` or `address` is
-  only in `json`.
+- An output named `json`, `sensitive`, `state-name`, `image`, `address`,
+  `plan-changes` or `plan-comment-url` is only in `json`.
 - A job that only reads state needs no Terraform: without `run`, the outputs
   are those of the state it loaded.
 - The outputs are also written to the step summary, under an h2 heading that
@@ -259,6 +262,75 @@ jobs:
   summary that would pass GitHub's 1 MiB limit is cut off at the end. If the
   summary can't be written, the step warns and goes on. `summary: false`
   turns it off.
+
+## Plans on pull requests
+
+Every `terraform plan` (or `tofu plan`) in the job is saved, and the action
+renders it to the step summary and, on a pull request, to a comment, so
+reviewers see the resource changes next to the code changes:
+
+```yaml
+on: pull_request
+
+permissions:
+  actions: read
+  packages: read
+  contents: read
+  pull-requests: write   # only for the comment
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: cnuss/actions-state@v1
+        with:
+          passphrase: ${{ secrets.STATE_PASSPHRASE }}
+          run: |
+            terraform init -input=false
+            terraform plan -input=false
+```
+
+- The action sets `TF_CLI_ARGS_plan=-out=actions_state.tfplan` for the job,
+  so a plain `plan` saves to the root module, and lists the file in
+  `.git/info/exclude`. A plan saved with your own `-out` is found too: the
+  newest plan file in `working-directory` since the step started. The
+  variable is job-wide, so a plan run in a directory the action does not
+  serve leaves `actions_state.tfplan` there.
+- A plan saved in `run` is rendered at the end of the step and sets the
+  `plan-changes` and `plan-comment-url` outputs. A plan saved in a later step
+  is rendered when the job ends, without outputs.
+- The comment has the counts (`Plan: 1 to add, 0 to change, 1 to destroy`)
+  and a report from [tfplan2md](https://github.com/oocx/tfplan2md): a summary
+  table and a collapsed section per resource. Changes made outside Terraform
+  are shown only for resources the plan changes. When tfplan2md can't run, the
+  plan is shown as `show` prints it, in a `diff` block. A footer names the
+  state serial and the commit the plan was made against, and links the run.
+- Each state has one comment, updated on every push. A plan with no changes
+  adds no comment, but an earlier comment is changed to say "No changes".
+- Without `pull-requests: write`, or on a pull request from a fork, whose
+  token is read-only, there is no comment and the step goes on. The step
+  summary has the plan either way; `summary: false` leaves it out.
+- The step summary gets the whole tfplan2md report, up to GitHub's 1 MiB
+  limit. A plan too long for a comment (65,536 characters) is cut down
+  there to the summary table, then to the text, with a link to the run.
+- The plan is read with `terraform show -json`, or `tofu show -json` when
+  terraform can't read it. The setup actions' wrappers are skipped for the
+  `terraform-bin` and `tofu-bin` beside them.
+- tfplan2md is downloaded from its GitHub release (version pinned, checked
+  against a SHA-256 in this action) on Linux x64 and arm64 and macOS arm64.
+  The Linux builds need glibc 2.39 (`ubuntu-24.04`); on older runners the
+  text is used instead.
+
+**Secrets.** A comment is posted through the API, so the runner's log
+masking does not apply to it, and in a public repository anyone can read
+it, even though the state is encrypted. Terraform shows values marked
+`sensitive` as `(sensitive value)`; the action also replaces every value the
+plan marks sensitive (variables, outputs, attributes) wherever else it
+appears, along with the token and passphrase. Values of 5 characters or
+fewer are not replaced. A secret that reaches an attribute Terraform does not
+mark sensitive is shown, as it is in the log: mark variables
+`sensitive = true`.
 
 ## Moving existing state
 
@@ -295,6 +367,7 @@ Run once with `replace-backend: true` and `terraform init -migrate-state
 ## Notes
 
 - Dependency-free: no `node_modules`, no bundling, no build step. Node 24.
+  The one download is the pinned tfplan2md binary for plan comments.
 - The server log is printed in a collapsed group at the end of the job.
 - Per-request logging of the action's outbound requests (cache, registry,
   GitHub API) turns on with runner debug logging: re-run the job with debug

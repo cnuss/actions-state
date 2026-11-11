@@ -6,6 +6,8 @@ const fs = require('fs');
 const path = require('path');
 
 const OVERRIDE_FILE = 'actions_state_override.tf';
+// Where `terraform plan` saves its plan unless the command names another -out.
+const PLAN_FILE = 'actions_state.tfplan';
 const LAYER_MEDIA_TYPE = 'application/vnd.cnuss.actions-state.tfstate.v1';
 const SOURCE = /\.(tf|tofu)(\.json)?$/;
 
@@ -135,11 +137,24 @@ function wire(dir, { endpoint }) {
   const file = path.join(dir, OVERRIDE_FILE);
   fs.writeFileSync(file, overrideHcl(endpoint));
   excludeFromGit(file);
+  const plan = path.join(dir, PLAN_FILE);
+  fs.rmSync(plan, { force: true });
+  excludeFromGit(plan);
   return {};
 }
 
+// The saved plan holds variable values and state, so it goes too.
 function unwire(dir) {
   fs.rmSync(path.join(dir, OVERRIDE_FILE), { force: true });
+  fs.rmSync(path.join(dir, PLAN_FILE), { force: true });
+}
+
+// TF_CLI_ARGS_plan that saves every plan to PLAN_FILE. Its args come before
+// the command's own, so an -out given on the command line wins.
+function planArgs(existing = '') {
+  const out = `-out=${PLAN_FILE}`;
+  if (existing.split(/\s+/).includes(out)) return existing;
+  return `${out} ${existing}`.trim();
 }
 
 function stateMeta(bytes) {
@@ -164,6 +179,6 @@ function stateOutputs(bytes) {
 }
 
 module.exports = {
-  name: 'terraform', OVERRIDE_FILE, LAYER_MEDIA_TYPE,
-  stripComments, findBackends, check, overrideHcl, wire, unwire, stateMeta, stateOutputs,
+  name: 'terraform', OVERRIDE_FILE, PLAN_FILE, LAYER_MEDIA_TYPE,
+  stripComments, findBackends, check, overrideHcl, wire, unwire, planArgs, stateMeta, stateOutputs,
 };
