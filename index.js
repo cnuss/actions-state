@@ -1,8 +1,9 @@
 'use strict';
 
-// main checks the configuration, starts the state server and points Terraform
-// at it; post stops the server and removes the override file. main and post are
-// the same file: main saves STATE_post so the post run knows which it is.
+// pre takes the state lock for the whole job (pre.js); main checks the
+// configuration, starts the state server and points Terraform at it; post stops
+// the server, removes the override file and releases the job's lock. main and
+// post are the same file: main saves STATE_post so the post run knows which it is.
 
 const fs = require('fs');
 const os = require('os');
@@ -11,7 +12,8 @@ const crypto = require('crypto');
 const { spawn } = require('child_process');
 const { deriveName, tagSlug, imageName } = require('./src/core/names');
 const { aadFor, isEncrypted, decrypt } = require('./src/core/crypto');
-const { request, restClient } = require('./src/core/http');
+const { request, restClient, cacheClient } = require('./src/core/http');
+const { createLock } = require('./src/core/lock');
 const { createStore, PREFIX } = require('./src/core/store');
 const { repoInfo, packageVisibility, findSelfJob } = require('./src/core/github');
 const { getAdapter } = require('./src/adapters');
@@ -159,6 +161,52 @@ function runScript(script, { cwd, env, scriptDir }) {
   }).finally(() => fs.rmSync(file, { force: true }));
 }
 
+// The job's hold on the state lock, taken before any other step runs and
+// released by post. Only jobs that may write take it: other refs only plan,
+// and another repository's state is only read.
+async function pre({ env = process.env, print = log, rest: givenRest, lockFor } = {}) {
+  const cfg = resolveConfig(env);
+  if (cfg.readOnly || !cfg.token) return null;
+  const rest = givenRest || restClient({ token: cfg.token, apiUrl: cfg.apiUrl });
+  const repo = await repoInfo(rest, cfg.repository);
+  const isDefaultRef = cfg.ref === `refs/heads/${repo.defaultBranch}`;
+  if (!isDefaultRef && !cfg.allowAnyRef) return null;
+
+  // A second use of one state name in a job is refused in main; it must not wait here on the first's lock.
+  fs.mkdirSync(cfg.runDir, { recursive: true });
+  try { fs.writeFileSync(path.join(cfg.runDir, `${cfg.slug}.pre`), '', { flag: 'wx' }); } catch (err) {
+    if (err.code === 'EEXIST') return null;
+    throw err;
+  }
+
+  const job = await findSelfJob(rest, env);
+  const identity = { run_id: env.GITHUB_RUN_ID, run_attempt: env.GITHUB_RUN_ATTEMPT, job_id: job.id, job_name: job.name, job_url: job.url, ref: cfg.ref };
+  const lock = lockFor
+    ? lockFor({ rest, identity, cfg })
+    : createLock({
+      twirp: cacheClient({ token: env.ACTIONS_RUNTIME_TOKEN, resultsUrl: env.ACTIONS_RESULTS_URL }),
+      rest, repository: cfg.repository, ref: cfg.ref, slug: cfg.slug, identity, log: (m) => print(`[actions-state] ${m}`),
+    });
+  const info = {
+    ID: `job-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}-${job.id}`, Operation: 'OperationTypeJob',
+    Who: `${job.name} (run ${env.GITHUB_RUN_ID})`, Version: '', Created: new Date().toISOString(), Path: cfg.name, Info: job.url || '',
+  };
+  print(`[actions-state] waiting up to ${cfg.lockTimeoutMs / 1000}s for the lock on "${cfg.name}"`);
+  const got = await lock.acquire({ info, waitMs: cfg.lockTimeoutMs });
+  if (!got.ok) {
+    const holder = got.current?.holder?.lockInfo?.Who || 'another job';
+    throw new Error(`the lock on "${cfg.name}" is still held by ${holder} after ${cfg.lockTimeoutMs / 1000}s`);
+  }
+  const held = { id: info.ID, entryId: got.entryId, holderId: got.holderId };
+  appendCommandFile(env.GITHUB_STATE, 'job_lock', JSON.stringify(held));
+  print(`[actions-state] locked "${cfg.name}" for this job (${info.ID})`);
+  return held;
+}
+
+function jobLockOf(env) {
+  try { return JSON.parse(env.STATE_job_lock || 'null'); } catch { return null; }
+}
+
 // Another repository's state is read, never served: no backend, no lock.
 function readOnlyRefusals({ source, run }) {
   if (run) throw new Error(`\`run\` needs the state served from this repository; ${source}'s state is only read`);
@@ -268,7 +316,7 @@ async function main() {
     runfile, apiUrl: cfg.apiUrl, registry: REGISTRY, repository: cfg.repository, ref: cfg.ref,
     slug: cfg.slug, name: cfg.name, image: cfg.image, adapter: adapter.name,
     identity: { run_id: env.GITHUB_RUN_ID, run_attempt: env.GITHUB_RUN_ATTEMPT, job_id: job.id, job_name: job.name, job_url: job.url, ref: cfg.ref },
-    isDefaultRef, allowAnyRef: cfg.allowAnyRef, lockTimeoutMs: cfg.lockTimeoutMs, aad: cfg.aad,
+    isDefaultRef, allowAnyRef: cfg.allowAnyRef, jobLock: jobLockOf(env), lockTimeoutMs: cfg.lockTimeoutMs, aad: cfg.aad,
     meta: { runId: env.GITHUB_RUN_ID, sha: env.GITHUB_SHA, ref: cfg.ref, defaultRef, source: `${cfg.serverUrl}/${cfg.repository}` },
   };
   const out = fs.openSync(logFile, 'a');
@@ -310,6 +358,12 @@ async function post({ env = process.env, print = log } = {}) {
     try { await fn(); } catch (err) { print(`::warning::[actions-state] ${what} failed: ${err.message}`); }
   };
   const runfile = env.STATE_runfile;
+  const rest = restClient({ token: input(env, 'github-token'), apiUrl: env.GITHUB_API_URL || 'https://api.github.com' });
+  const deleteEntry = async (id) => {
+    const r = await rest('DELETE', `/repos/${env.GITHUB_REPOSITORY}/actions/caches/${id}`);
+    if (r.status !== 204 && r.status !== 404) throw new Error(`HTTP ${r.status}`);
+    print(`[actions-state] deleted lock entry ${id}: HTTP ${r.status}`);
+  };
 
   if (runfile && fs.existsSync(runfile)) {
     let run = {};
@@ -324,12 +378,8 @@ async function post({ env = process.env, print = log } = {}) {
       } catch { /* server already gone */ }
     }
     if (!stopped) {
-      const rest = restClient({ token: input(env, 'github-token'), apiUrl: env.GITHUB_API_URL || 'https://api.github.com' });
       for (const id of run.held || []) {
-        await attempt(`deleting lock entry ${id}`, async () => {
-          const r = await rest('DELETE', `/repos/${env.GITHUB_REPOSITORY}/actions/caches/${id}`);
-          print(`[actions-state] deleted lock entry ${id}: HTTP ${r.status}`);
-        });
+        await attempt(`deleting lock entry ${id}`, () => deleteEntry(id));
       }
       if (run.pid) {
         await attempt(`stopping server process ${run.pid}`, () => {
@@ -338,6 +388,16 @@ async function post({ env = process.env, print = log } = {}) {
       }
     }
     await attempt('removing the runfile', () => fs.rmSync(runfile, { force: true }));
+  }
+
+  // After the server is down, so nothing it serves outlives the job's lock.
+  const jobLock = jobLockOf(env);
+  if (jobLock) {
+    await attempt(`releasing the job's lock (${jobLock.id})`, async () => {
+      await deleteEntry(jobLock.entryId);
+      print(`[actions-state] released the job's lock (${jobLock.id})`);
+    });
+    if (jobLock.holderId) await attempt(`deleting holder record ${jobLock.holderId}`, () => deleteEntry(jobLock.holderId));
   }
 
   if (env.STATE_working_directory) {
@@ -353,7 +413,7 @@ async function post({ env = process.env, print = log } = {}) {
   });
 }
 
-module.exports = { resolveConfig, jobPassword, claimRunfile, waitForServer, preflightActions, preflightPackages, needsWritePreflight, post, emitOutputs, writeSummary, fetchOutputs, runScript, scriptEnv, readStateOutputs, readOnlyRefusals };
+module.exports = { pre, resolveConfig, jobPassword, claimRunfile, waitForServer, preflightActions, preflightPackages, needsWritePreflight, post, emitOutputs, writeSummary, fetchOutputs, runScript, scriptEnv, readStateOutputs, readOnlyRefusals };
 
 if (require.main === module) {
   const run = process.env.STATE_post === 'true' ? post : main;

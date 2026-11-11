@@ -64,6 +64,7 @@ outputs:
 
 runs:
   using: 'node24'
+  pre: 'pre.js'
   main: 'index.js'
   post: 'index.js'
   post-if: always()

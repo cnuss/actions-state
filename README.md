@@ -38,10 +38,14 @@ listed in `.git/info/exclude`.
   The tag `<state>` points at the newest version and `<state>.v<serial>` keeps
   each one, so any version can be pulled back with standard OCI tools.
 - **Locks** are cache entries, the mechanism from
-  [actions-mutex](https://github.com/cnuss/actions-mutex). A second job waits
-  for the lock (up to `lock-timeout`). A lock left by a job whose runner died
-  is reclaimed by the next job waiting for it, which checks about once a
-  minute (a short `lock-timeout` gets one check at the end of its wait).
+  [actions-mutex](https://github.com/cnuss/actions-mutex). On the default
+  branch (or with `allow-apply-from-any-ref`), the action's `pre` step takes
+  the lock before the job's other steps run, and its `post` step releases it
+  when the job ends. Terraform's own locks nest inside it, so every step of the
+  job, including deploy steps after Terraform, runs under one hold. A second
+  job waits for the lock (up to `lock-timeout`). A lock left by a job whose
+  runner died is reclaimed by the next job waiting for it, which checks about
+  once a minute (a short `lock-timeout` gets one check at the end of its wait).
 - **Only the default branch writes.** Other refs (pull requests, feature
   branches) may `plan` against the current state; `apply` is refused unless
   `allow-apply-from-any-ref: true`. A save is also refused if a newer version
@@ -264,6 +268,8 @@ Run once with `replace-backend: true` and `terraform init -migrate-state
 
 ## Limits
 
+- The job's lock is taken in `pre`, so waiting jobs queue in the order they
+  start, not in commit order.
 - Locks are per ref. With `allow-apply-from-any-ref`, locks taken on different
   refs do not exclude each other; the stale-save check is the only guard.
 - `terraform apply -lock=false` cannot save state.
