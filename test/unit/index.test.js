@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
-const { resolveConfig, jobPassword, claimRunfile, waitForServer, preflightActions, preflightPackages, needsWritePreflight, post, emitOutputs, writeSummary, fetchOutputs, runScript, scriptEnv, readStateOutputs, readOnlyRefusals } = require('../../index');
+const { pre, resolveConfig, jobPassword, claimRunfile, waitForServer, preflightActions, preflightPackages, needsWritePreflight, post, emitOutputs, writeSummary, fetchOutputs, runScript, scriptEnv, readStateOutputs, readOnlyRefusals } = require('../../index');
 
 const baseEnv = {
   GITHUB_WORKSPACE: '/w', GITHUB_REPOSITORY: 'CNuss/Thing', GITHUB_REF: 'refs/heads/main', RUNNER_TEMP: '/tmp/rt',
@@ -326,4 +326,74 @@ test('readStateOutputs reads the newest version of another repo\'s state, decryp
 test('readOnlyRefusals: run needs the state served from this repository', () => {
   assert.throws(() => readOnlyRefusals({ source: 'o/infra', run: 'terraform plan' }), /`run` needs the state served from this repository; o\/infra's state is only read/);
   assert.doesNotThrow(() => readOnlyRefusals({ source: 'o/infra', run: '' }));
+});
+
+// The REST calls pre makes before the lock: the repository and this job.
+function preRest(fake, { defaultBranch = 'main', jobId = 7 } = {}) {
+  return async (method, p) => {
+    if (method === 'GET' && p === '/repos/o/r') return { status: 200, json: { visibility: 'private', default_branch: defaultBranch, owner: { type: 'User' } }, text: '' };
+    if (method === 'GET' && p.startsWith('/repos/o/r/actions/runs/')) {
+      return { status: 200, json: { jobs: [{ id: jobId, name: 'deploy', html_url: `https://github.com/o/r/actions/runs/1/job/${jobId}`, runner_name: 'r1', status: 'in_progress' }] }, text: '' };
+    }
+    return fake.rest(method, p);
+  };
+}
+
+function preEnv(stateFile, overrides = {}) {
+  return {
+    GITHUB_WORKSPACE: '/w', GITHUB_REPOSITORY: 'o/r', GITHUB_REF: 'refs/heads/main', GITHUB_RUN_ID: '1', GITHUB_RUN_ATTEMPT: '1',
+    RUNNER_NAME: 'r1', RUNNER_TEMP: fs.mkdtempSync(path.join(os.tmpdir(), 'as-pre-')), GITHUB_STATE: stateFile, 'INPUT_GITHUB-TOKEN': 'gh', 'INPUT_LOCK-TIMEOUT': '0', ...overrides,
+  };
+}
+
+test('pre takes the state lock for the job and saves it for main and post', async () => {
+  const { createFakeCache } = require('../fakes/cache');
+  const { createLock } = require('../../src/core/lock');
+  const fake = createFakeCache();
+  const lockFor = ({ rest, identity, cfg }) => createLock({ twirp: fake.twirp, rest, blobs: fake.blobs, repository: 'o/r', ref: cfg.ref, slug: cfg.slug, identity, sleep: async () => {} });
+  const stateFile = outputFile();
+  const env = preEnv(stateFile);
+  const held = await pre({ env, rest: preRest(fake), lockFor, print: () => {} });
+  assert.equal(held.id, 'job-1-1-7');
+  assert.deepEqual(JSON.parse(readCommandFile(stateFile).job_lock), held);
+  const current = await lockFor({ rest: fake.rest, identity: {}, cfg: { ref: 'refs/heads/main', slug: 'root' } }).readCurrent();
+  assert.equal(current.entryId, held.entryId);
+  assert.equal(current.holder.lockInfo.Operation, 'OperationTypeJob');
+  assert.equal(current.holder.identity.job_id, 7);
+
+  // A second use of the same name in this job takes nothing (main refuses it) instead of waiting on itself.
+  assert.equal(await pre({ env: { ...env, GITHUB_STATE: outputFile() }, rest: preRest(fake), lockFor, print: () => {} }), null);
+
+  // A second job waits, and with lock-timeout 0 fails naming the holder.
+  await assert.rejects(
+    pre({ env: preEnv(outputFile(), { GITHUB_RUN_ID: '2' }), rest: preRest(fake, { jobId: 8 }), lockFor, print: () => {} }),
+    /the lock on "root" is still held by deploy \(run 1\) after 0s/,
+  );
+});
+
+test('pre takes no lock where the job may only plan, or only reads another repository', async () => {
+  const { createFakeCache } = require('../fakes/cache');
+  const fake = createFakeCache();
+  const lockFor = () => { throw new Error('no lock expected'); };
+  const stateFile = outputFile();
+  assert.equal(await pre({ env: preEnv(stateFile, { GITHUB_REF: 'refs/pull/1/merge' }), rest: preRest(fake), lockFor, print: () => {} }), null);
+  assert.equal(await pre({ env: preEnv(stateFile, { INPUT_REPOSITORY: 'o/infra' }), rest: preRest(fake), lockFor, print: () => {} }), null);
+  assert.equal(readCommandFile(stateFile).job_lock, undefined);
+});
+
+test('post releases the job\'s lock, entry and holder record', async () => {
+  const deleted = [];
+  const api = http.createServer((req, res) => { deleted.push(`${req.method} ${req.url}`); res.statusCode = 204; res.end(); });
+  await new Promise((r) => api.listen(0, '127.0.0.1', r));
+  const printed = [];
+  await post({
+    env: {
+      STATE_job_lock: JSON.stringify({ id: 'job-1-1-7', entryId: '21', holderId: '22' }),
+      GITHUB_API_URL: `http://127.0.0.1:${api.address().port}`, GITHUB_REPOSITORY: 'o/r', 'INPUT_GITHUB-TOKEN': 'gh',
+    },
+    print: (m) => printed.push(m),
+  });
+  await new Promise((r) => api.close(r));
+  assert.deepEqual(deleted, ['DELETE /repos/o/r/actions/caches/21', 'DELETE /repos/o/r/actions/caches/22']);
+  assert.match(printed.join('\n'), /released the job's lock \(job-1-1-7\)/);
 });

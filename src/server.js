@@ -26,6 +26,7 @@ function readBody(req) {
 function createApp({
   password, lock, store, adapter, slug, name, isDefaultRef, allowAnyRef, lockTimeoutMs,
   passphrase, aad, meta,
+  jobLock = null, // the lock this job took in pre, held until post: Terraform's locks nest in it
   log = () => {},
   sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
   onHeldChange = () => {},
@@ -144,6 +145,11 @@ function createApp({
     if (closed) return sendJson(res, 423, refusal(info, 'state server is shutting down'));
     if (held) return held.id === info.ID ? send(res, 200) : sendJson(res, 423, held.info);
     if (locking) return sendJson(res, 423, locking);
+    if (writable && jobLock) {
+      held = { id: info.ID, info, virtual: true };
+      log(`locked "${name}" for ${info.Operation} (${info.ID}) under this job's lock`);
+      return send(res, 200);
+    }
     if (!writable && info.Operation !== 'OperationTypePlan') {
       const why = `${meta.ref} may only plan; set allow-apply-from-any-ref: true to apply from it`;
       log(`refused ${info.Operation} lock: ${why}`);
@@ -200,6 +206,7 @@ function createApp({
       return send(res, 200);
     }
     if (!writable) return send(res, 403, `${meta.ref} may only plan; force-unlock from the default branch`);
+    if (jobLock) return send(res, 409, `this job holds the lock on "${name}" until it ends; there is nothing to force-unlock`);
     const current = await lock.readCurrent();
     if (!current) return send(res, 200);
     if (await lock.forceRelease(info.ID || '')) {
@@ -325,7 +332,7 @@ async function start(env = process.env) {
   const app = createApp({
     password: env.ACTIONS_STATE_PASSWORD, lock, store, adapter: getAdapter(cfg.adapter),
     slug: cfg.slug, name: cfg.name, isDefaultRef: cfg.isDefaultRef, allowAnyRef: cfg.allowAnyRef,
-    lockTimeoutMs: cfg.lockTimeoutMs, passphrase: env.ACTIONS_STATE_PASSPHRASE || '', aad: cfg.aad, meta: cfg.meta, log,
+    lockTimeoutMs: cfg.lockTimeoutMs, passphrase: env.ACTIONS_STATE_PASSPHRASE || '', aad: cfg.aad, meta: cfg.meta, jobLock: cfg.jobLock || null, log,
     onHeldChange: (h) => writeRunfile({ port, held: h && !h.virtual ? [h.entryId, h.holderId].filter(Boolean) : [] }),
     onShutdown: () => setTimeout(() => process.exit(0), 50),
   });

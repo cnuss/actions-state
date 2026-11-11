@@ -185,6 +185,20 @@ test('a plan-only ref plans without a cache lock and is refused applies and save
   await s.close();
 });
 
+test('under the job\'s lock, Terraform\'s locks nest in it: no cache lock, saves work, no force-unlock', async () => {
+  const s = await setup({ jobLock: { id: 'job-1-1-7', entryId: 'e9', holderId: 'h9' } });
+  assert.equal((await s.call('LOCK', '/lock', s.lockBody('a'))).status, 200);
+  assert.equal(s.lock.state.acquireCalls, 0);
+  await s.call('GET', '/state');
+  assert.equal((await s.call('POST', '/state?ID=a', stateJson(1))).status, 200);
+  assert.equal((await s.call('UNLOCK', '/lock', s.lockBody('a'))).status, 200);
+  assert.deepEqual(s.lock.state.released, []);
+  const force = await s.call('UNLOCK', '/lock', '');
+  assert.equal(force.status, 409);
+  assert.match(force.text, /this job holds the lock on "root" until it ends/);
+  await s.close();
+});
+
 test('allow-apply-from-any-ref takes a real lock on other refs', async () => {
   const s = await setup({ isDefaultRef: false, allowAnyRef: true });
   assert.equal((await s.call('LOCK', '/lock', s.lockBody('x'))).status, 200);
