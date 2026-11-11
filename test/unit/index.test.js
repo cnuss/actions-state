@@ -397,3 +397,23 @@ test('post releases the job\'s lock, entry and holder record', async () => {
   assert.deepEqual(deleted, ['DELETE /repos/o/r/actions/caches/21', 'DELETE /repos/o/r/actions/caches/22']);
   assert.match(printed.join('\n'), /released the job's lock \(job-1-1-7\)/);
 });
+
+test('post.js, after a main step that was skipped, only cleans up: it serves no state and runs nothing', () => {
+  const { spawnSync } = require('node:child_process');
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), 'as-skipped-'));
+  const result = spawnSync(process.execPath, [path.join(__dirname, '..', '..', 'post.js')], {
+    env: {
+      PATH: process.env.PATH,
+      GITHUB_REPOSITORY: 'o/r',
+      GITHUB_REF: 'refs/heads/main',
+      RUNNER_TEMP: runDir,
+      'INPUT_GITHUB-TOKEN': 'gh',
+      'INPUT_RUN': 'echo the run script ran',
+    },
+    encoding: 'utf8',
+  });
+  {
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.doesNotMatch(result.stdout, /serving|the run script ran/);
+  }
+});

@@ -66,7 +66,7 @@ runs:
   using: 'node24'
   pre: 'pre.js'
   main: 'index.js'
-  post: 'index.js'
+  post: 'post.js'
   post-if: always()
 
 branding:

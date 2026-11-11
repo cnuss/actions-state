@@ -2,8 +2,8 @@
 
 // pre takes the state lock for the whole job (pre.js); main checks the
 // configuration, starts the state server and points Terraform at it; post stops
-// the server, removes the override file and releases the job's lock. main and
-// post are the same file: main saves STATE_post so the post run knows which it is.
+// the server, removes the override file and releases the job's lock (post.js).
+// Each has its own entry: with a pre, post runs even when main was skipped.
 
 const fs = require('fs');
 const os = require('os');
@@ -277,7 +277,6 @@ function writeSummary(outputs, { env = process.env, print = log, name, image } =
 }
 
 async function main() {
-  saveState('post', 'true');
   const env = process.env;
   const cfg = resolveConfig(env);
   if (!cfg.token) throw new Error('input `github-token` is required');
@@ -416,8 +415,7 @@ async function post({ env = process.env, print = log } = {}) {
 module.exports = { pre, resolveConfig, jobPassword, claimRunfile, waitForServer, preflightActions, preflightPackages, needsWritePreflight, post, emitOutputs, writeSummary, fetchOutputs, runScript, scriptEnv, readStateOutputs, readOnlyRefusals };
 
 if (require.main === module) {
-  const run = process.env.STATE_post === 'true' ? post : main;
-  run().catch((err) => {
+  main().catch((err) => {
     log(`::error::${err.message}`);
     process.exitCode = 1;
   });
